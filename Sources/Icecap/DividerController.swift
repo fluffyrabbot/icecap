@@ -221,11 +221,8 @@ final class DividerController: NSObject {
         defaults.set(recent + [now], forKey: Self.restartTimesKey)
         Self.log.info("restarting: \(reason, privacy: .public)")
         spacerItem?.length = Divider.spacerShowingLength
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "sleep 0.5; /usr/bin/open -n \"$0\"", Bundle.main.bundlePath]
         do {
-            try process.run()
+            try Relaunch.scheduleOpen(bundlePath: Bundle.main.bundlePath)
             NSApp.terminate(nil)
         } catch {
             Self.log.error("could not restart: \(error.localizedDescription, privacy: .public)")
