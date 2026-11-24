@@ -11,12 +11,26 @@ without reference to the source of Ice, Thaw, IceMelt or Bartender.
 Built and verified on macOS 26.7.2. It declares macOS 14 as its minimum, but has not
 been tried there.
 
-## Use
+## Install
+
+Build it from source with Swift 6 (Xcode or the Command Line Tools), then copy it to the
+Applications folder:
 
 ```bash
 Scripts/build-app.sh
-open build/icecap.app
 ```
+```bash
+ditto build/icecap.app /Applications/icecap.app
+```
+```bash
+open /Applications/icecap.app
+```
+
+icecap restarts itself from where it lies and opens at login from there, so it needs a
+lasting place. Opened from a disk image, or from where it was downloaded, it offers to
+move itself to the Applications folder, replacing any older copy there.
+
+## Use
 
 On first launch macOS asks for the Accessibility permission, which icecap needs to list
 the hidden icons and open their menus. It needs no Screen Recording permission. Once the
@@ -90,3 +104,28 @@ icecap writes its log under the subsystem `io.github.fluffyrabbot.icecap`:
 ```bash
 /usr/bin/log show --last 10m --info --predicate 'subsystem == "io.github.fluffyrabbot.icecap"'
 ```
+
+## Release
+
+`Scripts/release.sh` builds a universal, hardened-runtime `build/icecap-<version>.dmg`
+and the Homebrew cask `build/icecap.rb` from `Packaging/icecap.rb`. The version is
+`CFBundleShortVersionString` in `Resources/Info.plist`; the build number is the commit
+count. Run with any identity, it makes a disk image for testing on this Mac only.
+
+A public release needs a Developer ID identity and notarization credentials, stored once:
+
+```bash
+xcrun notarytool store-credentials icecap --apple-id <apple-id> --team-id <team-id>
+```
+
+Then, from a clean, pushed `main`:
+
+```bash
+ICECAP_SIGN_IDENTITY="Developer ID Application: <name> (<team-id>)" ICECAP_NOTARY_PROFILE=icecap Scripts/release.sh --publish
+```
+
+This notarizes and staples the disk image, tags the commit `v<version>`, and creates the
+GitHub release. Copy `build/icecap.rb` to `Casks/icecap.rb` in `fluffyrabbot/homebrew-tap`
+to publish the cask.
+
+The icon is drawn by `swift Scripts/draw-icon.swift`, which writes `Resources/AppIcon.icns`.
