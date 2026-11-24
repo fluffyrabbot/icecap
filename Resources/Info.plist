@@ -4,15 +4,17 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>icecap</string>
 	<key>CFBundleExecutable</key>
 	<string>icecap</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>io.github.fluffyrabbot.icecap</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>icecap</string>
-	<key>CFBundleDisplayName</key>
 	<string>icecap</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
