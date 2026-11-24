@@ -246,14 +246,48 @@ final class DividerController: NSObject {
         let event = NSApp.currentEvent
         if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
             showContextMenu()
-        } else if event?.modifierFlags.contains(.option) == true {
-            panel.close()
-            setShowingByChoice(!isShowingByChoice)
         } else if panel.isVisible {
             panel.close()
-        } else {
+        } else if event?.modifierFlags.contains(.option) == true {
             Task { await openPanel() }
+        } else if isShowingByChoice {
+            setShowingByChoice(false)
+        } else {
+            Task { await showGroupOrOpenPanel() }
         }
+    }
+
+    /// Shows the group in the menu bar if it fits on the display whose menu bar holds the
+    /// divider, beside the front application's menus and any camera housing; otherwise
+    /// opens the panel.
+    private func showGroupOrOpenPanel() async {
+        guard AccessibilityClient.isTrusted else {
+            panel.show(state: .needsAccessibility, at: dividerAnchor())
+            return
+        }
+        let items = await AccessibilityClient.items()
+        if let (group, dividerFrame) = group(of: items),
+           let statusAreaMinX = await statusAreaMinX(around: dividerFrame),
+           Divider.groupFits(group, dividerFrame: dividerFrame, statusAreaMinX: statusAreaMinX) {
+            Self.log.info("group of \(group.count) fits; showing it")
+            setShowingByChoice(true)
+        } else {
+            showPanel(listing: items)
+        }
+    }
+
+    /// The left bound of the status area on the display that holds the divider's frame,
+    /// or nil when no display holds it.
+    private func statusAreaMinX(around dividerFrame: CGRect) async -> CGFloat? {
+        let center = CGPoint(x: dividerFrame.midX, y: dividerFrame.midY)
+        guard let screen = NSScreen.screens.first(where: { CGDisplayBounds($0.displayIdentifier).contains(center) }) else {
+            return nil
+        }
+        return Divider.statusAreaMinX(
+            displayFrame: CGDisplayBounds(screen.displayIdentifier),
+            menuTitleFrames: await AccessibilityClient.frontMenuTitleFrames(),
+            unobscuredTopRightWidth: screen.auxiliaryTopRightArea?.width
+        )
     }
 
     // MARK: Group panel
@@ -263,19 +297,28 @@ final class DividerController: NSObject {
             panel.show(state: .needsAccessibility, at: dividerAnchor())
             return
         }
-        let entries = await groupEntries()
-        panel.show(state: .entries(entries, isShownInMenuBar: isShowingByChoice), at: dividerAnchor())
+        showPanel(listing: await AccessibilityClient.items())
     }
 
-    private func groupEntries() async -> [GroupPanel.Entry] {
-        let items = await AccessibilityClient.items()
+    private func showPanel(listing items: [AccessibleItem]) {
+        panel.show(state: .entries(groupEntries(of: items), isShownInMenuBar: isShowingByChoice), at: dividerAnchor())
+    }
+
+    /// The group's icons, left to right, and the divider's frame, as the Accessibility
+    /// API reports them for the display whose menu bar is active.
+    private func group(of items: [AccessibleItem]) -> (group: [MenuBarItem], dividerFrame: CGRect)? {
         let ownIdentifier = ProcessInfo.processInfo.processIdentifier
         // Of this application's own items, the divider is the rightmost laid-out one.
         guard let dividerFrame = items
             .filter({ $0.item.processIdentifier == ownIdentifier && $0.item.isLaidOut })
             .max(by: { $0.item.frame.maxX < $1.item.frame.maxX })?.item.frame
-        else { return [] }
+        else { return nil }
         let group = Divider.groupItems(items.map(\.item), dividerFrame: dividerFrame, excludingProcess: ownIdentifier)
+        return (group, dividerFrame)
+    }
+
+    private func groupEntries(of items: [AccessibleItem]) -> [GroupPanel.Entry] {
+        guard let (group, _) = group(of: items) else { return [] }
         return group.compactMap { member in
             guard let accessible = items.first(where: { $0.item.isSameItem(as: member) }) else { return nil }
             let icon = NSRunningApplication(processIdentifier: member.processIdentifier)?.icon

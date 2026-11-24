@@ -1,4 +1,4 @@
-import CoreGraphics
+import AppKit
 import Foundation
 import IcecapCore
 
@@ -28,5 +28,12 @@ enum WindowServer {
         var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
         guard CGGetActiveDisplayList(count, &displays, &count) == .success else { return [] }
         return displays.prefix(Int(count)).map(CGDisplayBounds)
+    }
+}
+
+extension NSScreen {
+    /// The window server's identifier for this screen's display.
+    var displayIdentifier: CGDirectDisplayID {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? kCGNullDirectDisplay
     }
 }

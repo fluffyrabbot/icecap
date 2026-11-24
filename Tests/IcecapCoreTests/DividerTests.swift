@@ -117,3 +117,48 @@ private func item(_ processIdentifier: Int32, _ bundle: String?, x: CGFloat, wid
         #expect(!Divider.isSpacerBesideDivider(spacerPreferredPosition: 503.5, dividerPreferredPosition: 620))
     }
 }
+
+@Suite struct ExpansionTests {
+    /// The built-in display of docs/OBSERVATIONS.md: 1512 points wide, 664 of them right
+    /// of the camera housing, so the status area cannot start left of 848.
+    let builtIn = CGRect(x: 0, y: 0, width: 1512, height: 982)
+    /// An external display above and right of it, as arranged on the observed machine.
+    let external = CGRect(x: 1512, y: -64, width: 1920, height: 1080)
+
+    @Test func groupWidthSpansFromTheLeftmostToTheRightmostIcon() {
+        let group = [item(10, "a", x: -4286), item(11, "b", x: -4248, width: 34), item(12, "c", x: -4100)]
+        #expect(Divider.groupWidth(group) == 224)
+        #expect(Divider.groupWidth([]) == 0)
+    }
+
+    @Test func cameraHousingBoundsTheStatusAreaOnTheBuiltInDisplay() {
+        let minX = Divider.statusAreaMinX(displayFrame: builtIn, menuTitleFrames: [], unobscuredTopRightWidth: 664)
+        #expect(minX == 848)
+    }
+
+    @Test func menuTitlesBoundTheStatusAreaOnADisplayWithoutAHousing() {
+        let titles = [
+            CGRect(x: 1522, y: -64, width: 34, height: 30),
+            CGRect(x: 2092, y: -64, width: 48, height: 30),
+        ]
+        let minX = Divider.statusAreaMinX(displayFrame: external, menuTitleFrames: titles, unobscuredTopRightWidth: nil)
+        #expect(minX == 2140)
+    }
+
+    @Test func menuTitlesOnAnotherDisplayAreIgnored() {
+        let titles = [CGRect(x: 2092, y: -64, width: 48, height: 30)]
+        let minX = Divider.statusAreaMinX(displayFrame: builtIn, menuTitleFrames: titles, unobscuredTopRightWidth: 664)
+        #expect(minX == 848)
+    }
+
+    @Test func groupFitsWhenItsWidthAndClearanceLieRightOfTheBound() {
+        let group = [item(10, "a", x: -4286), item(12, "c", x: -4100)]
+        // 224 points of icons and 8 of clearance end at 2140 for a divider at 2372.
+        #expect(Divider.groupFits(group, dividerFrame: CGRect(x: 2372, y: -64, width: 24, height: 30), statusAreaMinX: 2140))
+        #expect(!Divider.groupFits(group, dividerFrame: CGRect(x: 2371, y: -64, width: 24, height: 30), statusAreaMinX: 2140))
+    }
+
+    @Test func emptyGroupNeverFits() {
+        #expect(!Divider.groupFits([], dividerFrame: CGRect(x: 3000, y: 0, width: 24, height: 30), statusAreaMinX: 0))
+    }
+}

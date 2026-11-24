@@ -1,7 +1,8 @@
 # icecap
 
 A small menu bar organizer for macOS. It gathers the icons you choose into one group
-behind a chevron. Click the chevron to list them, and pick one to open its menu.
+behind a chevron. Click the chevron to show them in the menu bar, or, where they do not
+fit, to list them and pick one to open its menu.
 
 icecap is a clean-room implementation, MIT licensed. It is written from Apple's
 documentation and from the observations in [docs/OBSERVATIONS.md](docs/OBSERVATIONS.md),
@@ -24,8 +25,8 @@ every other application's icon starts in the group.
 
 | Action | Effect |
 |---|---|
-| Click the chevron | Lists the hidden icons. Pick one to show the group, open that icon's menu, and hide the group again once the menu closes. |
-| ⌥-click the chevron | Shows or hides the group in the menu bar. |
+| Click the chevron | Shows the group in the menu bar if it fits on that display beside the front application's menus and any camera housing. Otherwise lists the hidden icons: pick one to show the group, open that icon's menu, and hide the group again once the menu closes. Click again to hide the group. |
+| ⌥-click the chevron | Lists the hidden icons, whether or not the group fits. |
 | Right-click the chevron | Show or hide icons, open at login, Accessibility settings, quit. |
 | Show the group, then ⌘-drag an icon across the chevron | Moves the icon into or out of the group. |
 | ⌘-drag the chevron | Moves the group's boundary. icecap restarts once to follow it. |
@@ -37,6 +38,13 @@ invisible item kept immediately left of it. To hide the group, the spacer widens
 5,000 points and pushes every icon to its left beyond the display's left edge. To show
 the group, it shrinks to nothing. macOS 26 does not draw a status item that extends past
 the display, which is why the visible chevron needs an item of its own.
+
+On a click, icecap measures the group from the icons' Accessibility frames, which keep
+their widths and spacing while pushed off the display. The group fits if it would end at
+least 8 points right of the front application's last menu title and, on a display with a
+camera housing, right of the housing (`NSScreen.auxiliaryTopRightArea`). The measure is
+taken once per click: the group stays shown until the chevron is clicked again, even if
+the front application later needs more room.
 
 The panel lists the group's icons from the Accessibility API (`AXExtrasMenuBar`), by
 application icon and name. Choosing one shrinks the spacer and waits until the icon

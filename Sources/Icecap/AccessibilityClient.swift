@@ -46,6 +46,28 @@ enum AccessibilityClient {
         }.value
     }
 
+    /// The frames of the front application's menu titles, the Apple menu included, as
+    /// laid out on the display whose menu bar is active.
+    @MainActor
+    static func frontMenuTitleFrames() async -> [CGRect] {
+        guard let processIdentifier = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return [] }
+        return await Task.detached(priority: .userInitiated) {
+            let application = AXUIElementCreateApplication(processIdentifier)
+            AXUIElementSetMessagingTimeout(application, requestTimeout)
+            var bar: CFTypeRef?
+            guard
+                AXUIElementCopyAttributeValue(application, kAXMenuBarAttribute as CFString, &bar) == .success,
+                let bar, CFGetTypeID(bar) == AXUIElementGetTypeID()
+            else { return [] }
+            var children: CFTypeRef?
+            guard
+                AXUIElementCopyAttributeValue(bar as! AXUIElement, kAXChildrenAttribute as CFString, &children) == .success,
+                let elements = children as? [AXUIElement]
+            else { return [] }
+            return elements.compactMap(frame(of:))
+        }.value
+    }
+
     /// The current frame of the element, in global coordinates with a top-left origin.
     static func frame(of element: AXUIElement) -> CGRect? {
         guard

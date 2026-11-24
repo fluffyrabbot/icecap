@@ -80,6 +80,53 @@ public enum Divider {
         return distance - 1
     }
 
+    /// The clearance, in points, that the shown group must keep from whatever bounds the
+    /// status area on its left.
+    public static let expansionClearance: CGFloat = 8
+
+    /// The width of the group once shown: from its leftmost icon's left edge to its
+    /// rightmost icon's right edge. The icons keep their spacing while pushed off the
+    /// display, so the width is the same hidden or shown.
+    public static func groupWidth(_ group: [MenuBarItem]) -> CGFloat {
+        guard
+            let minX = group.map(\.frame.minX).min(),
+            let maxX = group.map(\.frame.maxX).max()
+        else { return 0 }
+        return maxX - minX
+    }
+
+    /// The right edge of whatever bounds the status area on the left of a display's menu
+    /// bar: the front application's menu titles, the camera housing, or the display's
+    /// own left edge, whichever lies furthest right.
+    ///
+    /// - Parameters:
+    ///   - displayFrame: The display's bounds in global coordinates.
+    ///   - menuTitleFrames: The frames of the front application's menu titles. Those not
+    ///     on this display are ignored.
+    ///   - unobscuredTopRightWidth: The width of the menu bar right of the camera housing,
+    ///     on a display that has one.
+    public static func statusAreaMinX(
+        displayFrame: CGRect,
+        menuTitleFrames: [CGRect],
+        unobscuredTopRightWidth: CGFloat?
+    ) -> CGFloat {
+        var minX = displayFrame.minX
+        if let unobscuredTopRightWidth {
+            minX = max(minX, displayFrame.maxX - unobscuredTopRightWidth)
+        }
+        for frame in menuTitleFrames where frame.width > 0 && displayFrame.intersects(frame) {
+            minX = max(minX, frame.maxX)
+        }
+        return minX
+    }
+
+    /// Whether the group, once shown, lies wholly between the status area's left bound
+    /// and the divider. An empty group does not fit: there is nothing to show.
+    public static func groupFits(_ group: [MenuBarItem], dividerFrame: CGRect, statusAreaMinX: CGFloat) -> Bool {
+        guard !group.isEmpty else { return false }
+        return dividerFrame.minX - groupWidth(group) - expansionClearance >= statusAreaMinX
+    }
+
     static func isOnSameRow(_ frame: CGRect, _ dividerFrame: CGRect) -> Bool {
         abs(frame.midY - dividerFrame.midY) < max(dividerFrame.height, 12)
     }
