@@ -25,7 +25,7 @@ every other application's icon starts in the group.
 
 | Action | Effect |
 |---|---|
-| Click the chevron | Shows the group in the menu bar if it fits on that display beside the front application's menus and any camera housing. Otherwise lists the hidden icons: pick one to show the group, open that icon's menu, and hide the group again once the menu closes. Click again to hide the group. |
+| Click the chevron | Shows the group in the menu bar wherever it fits beside the front application's menus and any camera housing. Otherwise lists the hidden icons: pick one to show the group, open that icon's menu, and hide the group again once the menu closes. Click again to hide the group. |
 | ⌥-click the chevron | Lists the hidden icons, whether or not the group fits. |
 | Right-click the chevron | Show or hide icons, open at login, Accessibility settings, quit. |
 | Show the group, then ⌘-drag an icon across the chevron | Moves the icon into or out of the group. |
@@ -42,9 +42,13 @@ the display, which is why the visible chevron needs an item of its own.
 On a click, icecap measures the group from the icons' Accessibility frames, which keep
 their widths and spacing while pushed off the display. The group fits if it would end at
 least 8 points right of the front application's last menu title and, on a display with a
-camera housing, right of the housing (`NSScreen.auxiliaryTopRightArea`). The measure is
-taken once per click: the group stays shown until the chevron is clicked again, even if
-the front application later needs more room.
+camera housing, right of the housing (`NSScreen.auxiliaryTopRightArea`). A click that
+finds room starts showing the group wherever it fits. From then on icecap checks the fit
+again when another application comes to the front, when one starts or ends, when the
+displays change, and every second, which catches the active menu bar moving to another
+display. It hides the group where it no longer fits and shows it again where it does,
+until the chevron is clicked again. The group's width is measured only while it is
+hidden, because the icons that do not fit on a narrow display are not laid out.
 
 The panel lists the group's icons from the Accessibility API (`AXExtrasMenuBar`), by
 application icon and name. Choosing one shrinks the spacer and waits until the icon
@@ -56,7 +60,9 @@ The pure logic (grouping, placement, menu detection, the reveal session) is in
 
 ## Limitations
 
-- One group. Icons in the panel show their application's icon, not their live picture,
+- One group, shown or hidden on every display at once. Shown where it fits, it follows
+  the display whose menu bar is active, and the other displays show the same.
+- Icons in the panel show their application's icon, not their live picture,
   because the system will not capture an icon that has been pushed off the display.
 - macOS does not reliably place a status item added again within a running process, so
   icecap restarts itself to move the spacer after the chevron is dragged. If it restarts

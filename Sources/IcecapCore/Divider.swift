@@ -120,11 +120,16 @@ public enum Divider {
         return minX
     }
 
-    /// Whether the group, once shown, lies wholly between the status area's left bound
-    /// and the divider. An empty group does not fit: there is nothing to show.
-    public static func groupFits(_ group: [MenuBarItem], dividerFrame: CGRect, statusAreaMinX: CGFloat) -> Bool {
-        guard !group.isEmpty else { return false }
-        return dividerFrame.minX - groupWidth(group) - expansionClearance >= statusAreaMinX
+    /// Whether a group of the given width, once shown, lies wholly between the status
+    /// area's left bound and the divider. An empty group does not fit: there is nothing
+    /// to show.
+    ///
+    /// Measure the width while the group is hidden. Shown on a display too narrow for it,
+    /// the icons that do not fit are not laid out, and the group measures narrower than
+    /// it is.
+    public static func groupFits(width: CGFloat, dividerFrame: CGRect, statusAreaMinX: CGFloat) -> Bool {
+        guard width > 0 else { return false }
+        return dividerFrame.minX - width - expansionClearance >= statusAreaMinX
     }
 
     static func isOnSameRow(_ frame: CGRect, _ dividerFrame: CGRect) -> Bool {

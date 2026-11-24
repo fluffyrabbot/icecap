@@ -152,13 +152,22 @@ private func item(_ processIdentifier: Int32, _ bundle: String?, x: CGFloat, wid
     }
 
     @Test func groupFitsWhenItsWidthAndClearanceLieRightOfTheBound() {
-        let group = [item(10, "a", x: -4286), item(12, "c", x: -4100)]
         // 224 points of icons and 8 of clearance end at 2140 for a divider at 2372.
-        #expect(Divider.groupFits(group, dividerFrame: CGRect(x: 2372, y: -64, width: 24, height: 30), statusAreaMinX: 2140))
-        #expect(!Divider.groupFits(group, dividerFrame: CGRect(x: 2371, y: -64, width: 24, height: 30), statusAreaMinX: 2140))
+        #expect(Divider.groupFits(width: 224, dividerFrame: CGRect(x: 2372, y: -64, width: 24, height: 30), statusAreaMinX: 2140))
+        #expect(!Divider.groupFits(width: 224, dividerFrame: CGRect(x: 2371, y: -64, width: 24, height: 30), statusAreaMinX: 2140))
+    }
+
+    @Test func groupMeasuredOnTheExternalDisplayDoesNotFitBesideTheHousing() {
+        // The observed group of ten measured 358 points; on the built-in display the
+        // divider sits near 1000, so the group would reach behind the housing at 848.
+        let divider = CGRect(x: 1000, y: 0, width: 29, height: 24)
+        let minX = Divider.statusAreaMinX(displayFrame: builtIn, menuTitleFrames: [], unobscuredTopRightWidth: 664)
+        #expect(!Divider.groupFits(width: 358, dividerFrame: divider, statusAreaMinX: minX))
+        let external = CGRect(x: 2896, y: -61, width: 29, height: 24)
+        #expect(Divider.groupFits(width: 358, dividerFrame: external, statusAreaMinX: 2140))
     }
 
     @Test func emptyGroupNeverFits() {
-        #expect(!Divider.groupFits([], dividerFrame: CGRect(x: 3000, y: 0, width: 24, height: 30), statusAreaMinX: 0))
+        #expect(!Divider.groupFits(width: 0, dividerFrame: CGRect(x: 3000, y: 0, width: 24, height: 30), statusAreaMinX: 0))
     }
 }

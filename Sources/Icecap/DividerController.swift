@@ -42,6 +42,10 @@ final class DividerController: NSObject {
     private var dividerMoveObserver: NSObjectProtocol?
     private let panel = GroupPanel()
     static let showsGroupKey = "ShowsGroup"
+    static let showsGroupWhereItFitsKey = "ShowsGroupWhereItFits"
+    /// How often the fit is checked again while the group is shown where it fits. Each
+    /// check reads only this application's own icons and the front application's menus.
+    static let fitCheckInterval: TimeInterval = 1
     static let restartTimesKey = "RestartTimes"
     /// More restarts than this within `restartWindow` mean that restarting does not help.
     static let restartLimit = 3
@@ -53,6 +57,19 @@ final class DividerController: NSObject {
         get { defaults.bool(forKey: Self.showsGroupKey) }
         set { defaults.set(newValue, forKey: Self.showsGroupKey) }
     }
+    /// Whether the person chose, by clicking the chevron, to show the group whenever it
+    /// fits on the display whose menu bar is active. Kept across restarts.
+    private var showsGroupWhereItFits: Bool {
+        get { defaults.bool(forKey: Self.showsGroupWhereItFitsKey) }
+        set { defaults.set(newValue, forKey: Self.showsGroupWhereItFitsKey) }
+    }
+    /// Whether the group fit when last checked.
+    private var doesGroupFit = false
+    /// The group's width as last measured while it was hidden; see `Divider.groupFits`.
+    private var hiddenGroupWidth: CGFloat = 0
+    private var fitTimer: Timer?
+    private var fitObservers: [(NotificationCenter, NSObjectProtocol)] = []
+    private var isCheckingFit = false
     /// Whether the group is shown for the moment, so that one of its icons can be pressed.
     private var isShowingForPress = false
     private var pressTask: Task<Void, Never>?
@@ -62,6 +79,7 @@ final class DividerController: NSObject {
         super.init()
         panel.onChoose = { [weak self] entry in self?.press(entry) }
         panel.onShowInMenuBar = { [weak self] in self?.setShowingByChoice(true) }
+        if showsGroupWhereItFits { watchFit() }
     }
 
     func start() async {
@@ -137,6 +155,7 @@ final class DividerController: NSObject {
             isSpacerPlaced = true
             Self.log.info("spacer placed at preferred position \(self.defaults.double(forKey: Self.preferredPositionKey(self.spacerAutosaveName)))")
             applyLength()
+            await checkFit(measuringGroup: true)
         }
     }
 
@@ -214,7 +233,9 @@ final class DividerController: NSObject {
         }
     }
 
-    private var isShowing: Bool { isShowingByChoice || isShowingForPress }
+    /// Whether the group is shown because the person asked for it, by choice or where it fits.
+    private var isShownOnRequest: Bool { isShowingByChoice || (showsGroupWhereItFits && doesGroupFit) }
+    private var isShowing: Bool { isShownOnRequest || isShowingForPress }
 
     private func applyLength() {
         updateChevron()
@@ -242,6 +263,18 @@ final class DividerController: NSObject {
         applyLength()
     }
 
+    /// Hides the group, and stops showing it where it fits.
+    private func hideOnRequest() {
+        isShowingByChoice = false
+        setShowingWhereItFits(false)
+    }
+
+    private func setShowingWhereItFits(_ showing: Bool) {
+        showsGroupWhereItFits = showing
+        if showing { watchFit() } else { stopWatchingFit() }
+        applyLength()
+    }
+
     @objc private func dividerClicked(_ sender: Any?) {
         let event = NSApp.currentEvent
         if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
@@ -250,8 +283,8 @@ final class DividerController: NSObject {
             panel.close()
         } else if event?.modifierFlags.contains(.option) == true {
             Task { await openPanel() }
-        } else if isShowingByChoice {
-            setShowingByChoice(false)
+        } else if isShownOnRequest {
+            hideOnRequest()
         } else {
             Task { await showGroupOrOpenPanel() }
         }
@@ -267,13 +300,93 @@ final class DividerController: NSObject {
         }
         let items = await AccessibilityClient.items()
         if let (group, dividerFrame) = group(of: items),
-           let statusAreaMinX = await statusAreaMinX(around: dividerFrame),
-           Divider.groupFits(group, dividerFrame: dividerFrame, statusAreaMinX: statusAreaMinX) {
-            Self.log.info("group of \(group.count) fits; showing it")
-            setShowingByChoice(true)
-        } else {
-            showPanel(listing: items)
+           let statusAreaMinX = await statusAreaMinX(around: dividerFrame) {
+            let width = Divider.groupWidth(group)
+            if !isShowing { hiddenGroupWidth = width }
+            if Divider.groupFits(width: max(width, hiddenGroupWidth), dividerFrame: dividerFrame, statusAreaMinX: statusAreaMinX) {
+                Self.log.info("group of \(group.count) fits; showing it where it fits")
+                doesGroupFit = true
+                setShowingWhereItFits(true)
+                return
+            }
         }
+        showPanel(listing: items)
+    }
+
+    // MARK: Fit
+
+    /// Checks the fit again whenever it may have changed: when another application comes
+    /// to the front, when one starts or ends, when the displays change, and every
+    /// `fitCheckInterval`, which catches the active menu bar moving to another display.
+    private func watchFit() {
+        guard fitTimer == nil else { return }
+        fitTimer = Timer.scheduledTimer(withTimeInterval: Self.fitCheckInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                Task { await self.checkFit(measuringGroup: false) }
+            }
+        }
+        let workspace = NSWorkspace.shared.notificationCenter
+        let names: [(NotificationCenter, Notification.Name)] = [
+            (workspace, NSWorkspace.didActivateApplicationNotification),
+            (workspace, NSWorkspace.didLaunchApplicationNotification),
+            (workspace, NSWorkspace.didTerminateApplicationNotification),
+            (NotificationCenter.default, NSApplication.didChangeScreenParametersNotification),
+        ]
+        fitObservers = names.map { center, name in
+            let observer = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    Task {
+                        // The menu bar is laid out again shortly after the change.
+                        try? await Task.sleep(for: .milliseconds(400))
+                        await self.checkFit(measuringGroup: true)
+                    }
+                }
+            }
+            return (center, observer)
+        }
+    }
+
+    private func stopWatchingFit() {
+        fitTimer?.invalidate()
+        fitTimer = nil
+        for (center, observer) in fitObservers { center.removeObserver(observer) }
+        fitObservers = []
+    }
+
+    /// Shows or hides the group, while it is shown where it fits, as it now fits or not
+    /// on the display whose menu bar is active.
+    ///
+    /// - Parameter measuringGroup: Whether to read every application's icons, which takes
+    ///   up to two seconds, to measure the group again; otherwise the last width measured
+    ///   while the group was hidden is used.
+    private func checkFit(measuringGroup: Bool) async {
+        guard showsGroupWhereItFits, isSpacerPlaced, !isShowingForPress, !isCheckingFit,
+              AccessibilityClient.isTrusted else { return }
+        isCheckingFit = true
+        defer { isCheckingFit = false }
+        let ownIdentifier = ProcessInfo.processInfo.processIdentifier
+        let items = await AccessibilityClient.items(ofProcess: measuringGroup ? nil : ownIdentifier)
+        guard let (group, dividerFrame) = group(of: items),
+              let statusAreaMinX = await statusAreaMinX(around: dividerFrame),
+              showsGroupWhereItFits, !isShowingForPress
+        else { return }
+        var width = hiddenGroupWidth
+        if measuringGroup {
+            let measured = Divider.groupWidth(group)
+            if isShowing {
+                width = max(width, measured)
+            } else {
+                hiddenGroupWidth = measured
+                width = measured
+            }
+        }
+        let fits = Divider.groupFits(width: width, dividerFrame: dividerFrame, statusAreaMinX: statusAreaMinX)
+        guard fits != doesGroupFit else { return }
+        Self.log.info("group of width \(width) \(fits ? "fits again; showing it" : "no longer fits; hiding it", privacy: .public)")
+        doesGroupFit = fits
+        applyLength()
     }
 
     /// The left bound of the status area on the display that holds the divider's frame,
@@ -301,7 +414,7 @@ final class DividerController: NSObject {
     }
 
     private func showPanel(listing items: [AccessibleItem]) {
-        panel.show(state: .entries(groupEntries(of: items), isShownInMenuBar: isShowingByChoice), at: dividerAnchor())
+        panel.show(state: .entries(groupEntries(of: items), isShownInMenuBar: isShownOnRequest), at: dividerAnchor())
     }
 
     /// The group's icons, left to right, and the divider's frame, as the Accessibility
@@ -350,7 +463,7 @@ final class DividerController: NSObject {
 
     private func reveal(andPress target: AccessibleItem) async {
         // A press that cancels an earlier one takes over the duty to hide the group again.
-        let hidesAfterward = !isShowingByChoice
+        let hidesAfterward = !isShownOnRequest
         if hidesAfterward {
             isShowingForPress = true
             applyLength()
@@ -405,7 +518,7 @@ final class DividerController: NSObject {
         guard let button = dividerItem?.button else { return }
         let menu = NSMenu()
         let showItem = NSMenuItem(
-            title: isShowingByChoice ? "Hide Icons" : "Show Hidden Icons",
+            title: isShownOnRequest ? "Hide Icons" : "Show Hidden Icons",
             action: #selector(toggleShowing),
             keyEquivalent: ""
         )
@@ -431,7 +544,7 @@ final class DividerController: NSObject {
     }
 
     @objc private func toggleShowing() {
-        setShowingByChoice(!isShowingByChoice)
+        if isShownOnRequest { hideOnRequest() } else { setShowingByChoice(true) }
     }
 
     @objc private func toggleOpenAtLogin() {

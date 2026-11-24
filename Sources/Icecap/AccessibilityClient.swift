@@ -30,11 +30,15 @@ enum AccessibilityClient {
         _ = AXIsProcessTrustedWithOptions(options)
     }
 
-    /// Every menu bar icon of every running application, including this one. The requests
-    /// run off the main thread, so that this application can answer its own.
+    /// Every menu bar icon of every running application, including this one, or of the
+    /// given process alone. The requests run off the main thread, so that this
+    /// application can answer its own.
     @MainActor
-    static func items() async -> [AccessibleItem] {
-        let owners = NSWorkspace.shared.runningApplications.map { application in
+    static func items(ofProcess processIdentifier: Int32? = nil) async -> [AccessibleItem] {
+        let applications = NSWorkspace.shared.runningApplications.filter {
+            processIdentifier == nil || $0.processIdentifier == processIdentifier
+        }
+        let owners = applications.map { application in
             ProcessOwner(
                 processIdentifier: application.processIdentifier,
                 bundleIdentifier: application.bundleIdentifier,
