@@ -132,6 +132,13 @@ public enum Divider {
         return dividerFrame.minX - width - expansionClearance >= statusAreaMinX
     }
 
+    /// Whether every icon of the group lies off every display, as it does once the spacer
+    /// has widened and the menu bar has been laid out again. Until then, some icons have
+    /// moved and others not, and the group measures far wider than it is.
+    public static func isGroupPushedOff(_ group: [MenuBarItem], displays: [CGRect]) -> Bool {
+        group.allSatisfy { item in !displays.contains { $0.intersects(item.frame) } }
+    }
+
     static func isOnSameRow(_ frame: CGRect, _ dividerFrame: CGRect) -> Bool {
         abs(frame.midY - dividerFrame.midY) < max(dividerFrame.height, 12)
     }

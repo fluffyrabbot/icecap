@@ -171,3 +171,23 @@ private func item(_ processIdentifier: Int32, _ bundle: String?, x: CGFloat, wid
         #expect(!Divider.groupFits(width: 0, dividerFrame: CGRect(x: 3000, y: 0, width: 24, height: 30), statusAreaMinX: 0))
     }
 }
+
+@Suite struct GroupPushedOffTests {
+    let displays = [CGRect(x: 0, y: 0, width: 1512, height: 982), CGRect(x: 1512, y: -64, width: 1920, height: 1080)]
+
+    @Test func aGroupWhollyLeftOfEveryDisplayIsPushedOff() {
+        let group = [item(10, "a", x: -2375), item(11, "b", x: -2266)]
+        #expect(Divider.isGroupPushedOff(group, displays: displays))
+    }
+
+    @Test func aGroupCaughtMidMoveIsNotPushedOff() {
+        // Measured on the external display 0.66 s after the spacer widened: one icon had
+        // moved off the displays and another had not, giving a width of 5,268 points.
+        let group = [item(10, "a", x: -2375), item(11, "b", x: 2855)]
+        #expect(!Divider.isGroupPushedOff(group, displays: displays))
+    }
+
+    @Test func anEmptyGroupIsPushedOff() {
+        #expect(Divider.isGroupPushedOff([], displays: displays))
+    }
+}
