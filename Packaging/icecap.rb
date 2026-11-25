@@ -18,7 +18,7 @@ cask "icecap" do
 
   app "icecap.app"
 
-  uninstall quit: "io.github.fluffyrabbot.icecap"
+  uninstall quit: "com.memorysynchub.icecap"
 
-  zap trash: "~/Library/Preferences/io.github.fluffyrabbot.icecap.plist"
+  zap trash: "~/Library/Preferences/com.memorysynchub.icecap.plist"
 end

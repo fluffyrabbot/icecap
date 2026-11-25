@@ -8,7 +8,7 @@ import ServiceManagement
 /// left; the divider shows them on request and opens the panel that lists them.
 @MainActor
 final class DividerController: NSObject {
-    static let log = Logger(subsystem: "io.github.fluffyrabbot.icecap", category: "divider")
+    static let log = Logger(subsystem: "com.memorysynchub.icecap", category: "divider")
     static let dividerAutosaveName = "icecap"
     static let spacerGenerationKey = "SpacerGeneration"
     static let positionSeededKey = "PreferredPositionSeeded"

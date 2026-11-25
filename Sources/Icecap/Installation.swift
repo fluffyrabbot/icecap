@@ -17,7 +17,7 @@ enum Relaunch {
 /// Moving icecap to an Applications folder when it runs from a place it cannot stay.
 @MainActor
 enum Installation {
-    static let log = Logger(subsystem: "io.github.fluffyrabbot.icecap", category: "installation")
+    static let log = Logger(subsystem: "com.memorysynchub.icecap", category: "installation")
     /// How long to wait for an older copy to quit before replacing it.
     static let terminationWaitLimit: TimeInterval = 5
 

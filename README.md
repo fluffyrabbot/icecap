@@ -37,6 +37,12 @@ the hidden icons and open their menus. It needs no Screen Recording permission. 
 permission is granted, icecap places its chevron just left of the system's icons, so
 every other application's icon starts in the group.
 
+The bundle identifier changed from `io.github.fluffyrabbot.icecap` to
+`com.memorysynchub.icecap`. macOS keys the Accessibility permission and the stored
+settings on it, so a copy built before the change has to be granted the permission once
+more, and the group's arrangement starts afresh. The stale entry under the old identifier
+can be removed with `tccutil reset Accessibility io.github.fluffyrabbot.icecap`.
+
 | Action | Effect |
 |---|---|
 | Click the chevron | Shows the group in the menu bar wherever it fits beside the front application's menus and any camera housing. Otherwise lists the hidden icons: pick one to show the group, open that icon's menu, and hide the group again once the menu closes. Click again to hide the group. |
@@ -99,10 +105,10 @@ first "Apple Development" identity in the keychain, otherwise ad hoc. A stable i
 keeps the Accessibility permission across rebuilds. An ad hoc signature loses it on
 every build.
 
-icecap writes its log under the subsystem `io.github.fluffyrabbot.icecap`:
+icecap writes its log under the subsystem `com.memorysynchub.icecap`:
 
 ```bash
-/usr/bin/log show --last 10m --info --predicate 'subsystem == "io.github.fluffyrabbot.icecap"'
+/usr/bin/log show --last 10m --info --predicate 'subsystem == "com.memorysynchub.icecap"'
 ```
 
 ## Release
