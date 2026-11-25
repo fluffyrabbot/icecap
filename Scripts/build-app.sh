@@ -32,8 +32,8 @@ if [[ "$configuration" == "release" ]]; then
   architectures=(--arch arm64 --arch x86_64)
 fi
 
-swift build -c "$configuration" "${architectures[@]}" --product icecap
-binary="$(swift build -c "$configuration" "${architectures[@]}" --show-bin-path)/icecap"
+swift build -c "$configuration" ${architectures[@]+"${architectures[@]}"} --product icecap
+binary="$(swift build -c "$configuration" ${architectures[@]+"${architectures[@]}"} --show-bin-path)/icecap"
 
 bundle="$repository/build/icecap.app"
 rm -rf "$bundle"
