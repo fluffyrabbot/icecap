@@ -35,7 +35,8 @@ move itself to the Applications folder, replacing any older copy there.
 On first launch macOS asks for the Accessibility permission, which icecap needs to list
 the hidden icons and open their menus. It needs no Screen Recording permission. Once the
 permission is granted, icecap places its chevron just left of the system's icons, so
-every other application's icon starts in the group.
+every other application's icon starts in the group, and shows the group beside a note on
+how to ⌘-drag icons out of it.
 
 The bundle identifier changed from `io.github.fluffyrabbot.icecap` to
 `com.memorysynchub.icecap`. macOS keys the Accessibility permission and the stored
@@ -48,8 +49,9 @@ can be removed with `tccutil reset Accessibility io.github.fluffyrabbot.icecap`.
 | Click the chevron | Shows the group in the menu bar if it fits beside the front application's menus and any camera housing, and hides it again once the pointer has been out of the menu bar for a second with no menu open. Otherwise lists the hidden icons: pick one to show the group, open that icon's menu, and hide the group again once the menu closes. Click again to hide the group at once. |
 | ⌥-click the chevron, or press ⌃⌥⌘Space in any application | Lists the hidden icons, whether or not the group fits. Press the shortcut again to close the list. |
 | Type in the list | Narrows it to the icons whose names match. ↑ and ↓ move the selection, Return opens the selected icon's menu, Escape clears the filter and then closes the list. |
-| Right-click the chevron | Always show the group where it fits, list hidden icons, choose the keyboard shortcut (⌃⌥⌘Space, ⌃⌥⌘H, ⌃⌥⌘M or none), open at login, Accessibility settings, quit. |
+| Right-click the chevron | Always show the group where it fits, list hidden icons, arrange icons, choose the keyboard shortcut (⌃⌥⌘Space, ⌃⌥⌘H, ⌃⌥⌘M or none), open at login, Accessibility settings, quit. |
 | Show the group, then ⌘-drag an icon across the chevron | Moves the icon into or out of the group. |
+| Choose Arrange Icons… | Shows the group beside a note on how to arrange it, until Done is clicked. The note also opens by itself when icecap first places the chevron. |
 | Choose Always Show Where It Fits | Keeps the group shown whenever it fits, and hides it where it does not, until the item is chosen again or the chevron is clicked while the group is shown. |
 | ⌘-drag the chevron | Moves the group's boundary. icecap restarts once to follow it. |
 
@@ -79,7 +81,8 @@ measured only while it is hidden, because the icons that do not fit on a narrow 
 are not laid out.
 
 The panel lists the group's icons from the Accessibility API (`AXExtrasMenuBar`), by
-application icon and name. Choosing one shrinks the spacer and waits until the icon lies
+application icon and name; icons of one application that share a name are numbered
+from left to right. Choosing one shrinks the spacer and waits until the icon lies
 on a display, then presses it with `AXPress`. icecap then watches the window list for
 the icon's menu and hides the group once the menu has closed.
 

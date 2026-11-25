@@ -8,12 +8,16 @@ import IcecapCore
 final class GroupPanel: NSObject, NSSearchFieldDelegate {
     struct Entry {
         let accessible: AccessibleItem
+        /// The icon's name as listed, numbered where several icons share it.
+        let title: String
         let icon: NSImage?
     }
 
     enum State {
         case needsAccessibility
         case entries([Entry], isShownInMenuBar: Bool)
+        /// How to arrange the icons, shown while the group is shown for arranging.
+        case arrangementHelp(shortcutTitle: String?)
     }
 
     /// One row that can be chosen.
@@ -21,6 +25,7 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
         case entry(Entry)
         case showInMenuBar
         case openAccessibilitySettings
+        case done
     }
 
     static let width: CGFloat = 260
@@ -28,6 +33,7 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
 
     var onChoose: ((Entry) -> Void)?
     var onShowInMenuBar: (() -> Void)?
+    var onDone: (() -> Void)?
 
     private var window: GroupPanelWindow?
     private var monitors: [Any] = []
@@ -69,9 +75,12 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
         window.title = "icecap group"
         window.contentView = content
         window.onCommand = { [weak self] command in self?.perform(command) ?? false }
-        window.onResignKey = { [weak self] in self?.close() }
         self.window = window
         window.orderFrontRegardless()
+        // The arrangement help stays open while the person drags icons and clicks
+        // elsewhere, and leaves the keyboard with the application in front.
+        if case .arrangementHelp = state { return }
+        window.onResignKey = { [weak self] in self?.close() }
         window.makeKey()
         if let searchField { window.makeFirstResponder(searchField) }
         let mouseDown: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
@@ -144,6 +153,9 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
         case .openAccessibilitySettings:
             close()
             Self.openAccessibilitySettings()
+        case .done:
+            close()
+            onDone?()
         }
     }
 
@@ -154,9 +166,11 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
         switch state {
         case .needsAccessibility:
             rows = [.openAccessibilitySettings]
+        case .arrangementHelp:
+            rows = [.done]
         case .entries(let entries, let isShownInMenuBar):
             let matching = ItemSearch.matches(entries, query: query) { entry in
-                [entry.accessible.item.name, entry.accessible.item.applicationName]
+                [entry.title, entry.accessible.item.applicationName]
             }
             rows = matching.map(Row.entry)
             if query.isEmpty, !entries.isEmpty, !isShownInMenuBar { rows.append(.showInMenuBar) }
@@ -196,9 +210,10 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
 
     private func title(of row: Row) -> String {
         switch row {
-        case .entry(let entry): entry.accessible.item.name
+        case .entry(let entry): entry.title
         case .showInMenuBar: "Show in Menu Bar"
         case .openAccessibilitySettings: "Open Accessibility Settings…"
+        case .done: "Done"
         }
     }
 
@@ -237,6 +252,16 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
         switch state {
         case .needsAccessibility:
             stack.addArrangedSubview(note("icecap needs the Accessibility permission to list and open hidden icons."))
+        case .arrangementHelp(let shortcutTitle):
+            let listing = shortcutTitle.map { ", or press \($0) to list them" } ?? ""
+            for text in [
+                "icecap hides the icons left of the chevron. They are shown while this note is open.",
+                "To keep an icon in view, hold ⌘ and drag it to the right of the chevron. To hide one, drag it to the left.",
+                "If some icons do not appear, switch to an application with fewer menus, such as Finder.",
+                "Click the chevron to show hidden icons for a moment\(listing).",
+            ] {
+                stack.addArrangedSubview(note(text))
+            }
         case .entries(let entries, _):
             if entries.isEmpty {
                 stack.addArrangedSubview(note("No icons are hidden. Hold ⌘ and drag icons to the left of the chevron to hide them."))
@@ -365,6 +390,8 @@ final class GroupRow: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) { onHover?() }
+    /// The arrangement help never takes key status, so its rows act on the first click.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with event: NSEvent) {}
 
     override func mouseUp(with event: NSEvent) {

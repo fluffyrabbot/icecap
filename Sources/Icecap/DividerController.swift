@@ -63,6 +63,14 @@ final class DividerController: NSObject {
     /// menu bar while no menu is open.
     private var peekTask: Task<Void, Never>?
     private var isPeeking: Bool { peekTask != nil }
+    static let showsArrangementHelpKey = "ShowsArrangementHelp"
+    /// Whether the arrangement help is open, or is to open once the spacer is placed: on
+    /// the first launch with the Accessibility permission, and again after a restart that
+    /// dragging an icon caused while it was open. Kept across restarts.
+    private var showsArrangementHelp: Bool {
+        get { defaults.bool(forKey: Self.showsArrangementHelpKey) }
+        set { defaults.set(newValue, forKey: Self.showsArrangementHelpKey) }
+    }
     /// The processes that own the group's icons, as last listed in the panel.
     private var listedGroupProcesses: Set<Int32> = []
     /// Whether the group fit when last checked.
@@ -97,6 +105,7 @@ final class DividerController: NSObject {
             guard let self else { return }
             self.startPeek(groupProcesses: self.listedGroupProcesses)
         }
+        panel.onDone = { [weak self] in self?.showsArrangementHelp = false }
         if alwaysShowsGroupWhereItFits { watchFit() }
     }
 
@@ -175,6 +184,7 @@ final class DividerController: NSObject {
             Self.log.info("spacer placed at preferred position \(self.defaults.double(forKey: Self.preferredPositionKey(self.spacerAutosaveName)))")
             applyLength()
             await checkFit(measuringGroup: true)
+            if showsArrangementHelp { await openArrangementHelp() }
         }
     }
 
@@ -339,7 +349,7 @@ final class DividerController: NSObject {
         if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
             showContextMenu()
         } else if panel.isVisible {
-            panel.close()
+            closePanel()
         } else if event?.modifierFlags.contains(.option) == true {
             Task { await openPanel() }
         } else if isPeeking {
@@ -500,10 +510,10 @@ final class DividerController: NSObject {
 
     private func groupEntries(of items: [AccessibleItem]) -> [GroupPanel.Entry] {
         guard let (group, _) = group(of: items) else { return [] }
-        return group.compactMap { member in
+        return zip(group, MenuBarItem.listedNames(of: group)).compactMap { member, title in
             guard let accessible = items.first(where: { $0.item.isSameItem(as: member) }) else { return nil }
             let icon = NSRunningApplication(processIdentifier: member.processIdentifier)?.icon
-            return GroupPanel.Entry(accessible: accessible, icon: icon)
+            return GroupPanel.Entry(accessible: accessible, title: title, icon: icon)
         }
     }
 
@@ -541,10 +551,37 @@ final class DividerController: NSObject {
     /// Opens the panel, whether or not the group fits, or closes it if it is open.
     private func panelShortcutPressed() {
         if panel.isVisible {
-            panel.close()
+            closePanel()
         } else {
             Task { await openPanel() }
         }
+    }
+
+    // MARK: Arrangement help
+
+    /// Shows the group and, beside it, how to arrange its icons. The group stays shown
+    /// while the help is open, because the panel counts as the pointer's presence in a
+    /// peek; see `startPeek`.
+    private func openArrangementHelp() async {
+        showsArrangementHelp = true
+        guard AccessibilityClient.isTrusted else {
+            panel.show(state: .needsAccessibility, at: dividerAnchor())
+            return
+        }
+        let items = await AccessibilityClient.items()
+        panel.show(state: .arrangementHelp(shortcutTitle: hotKey?.shortcut.title), at: dividerAnchor())
+        let processes = group(of: items).map { Set($0.group.map(\.processIdentifier)) } ?? []
+        startPeek(groupProcesses: processes)
+    }
+
+    /// Closes the panel, and with it the arrangement help if that is what it shows.
+    private func closePanel() {
+        panel.close()
+        showsArrangementHelp = false
+    }
+
+    @objc private func arrangeIcons() {
+        Task { await openArrangementHelp() }
     }
 
     // MARK: Pressing a hidden icon
@@ -608,7 +645,7 @@ final class DividerController: NSObject {
     // MARK: Context menu
 
     private func showContextMenu() {
-        panel.close()
+        closePanel()
         guard let button = dividerItem?.button else { return }
         let menu = NSMenu()
         let alwaysItem = NSMenuItem(
@@ -622,6 +659,9 @@ final class DividerController: NSObject {
         let listItem = NSMenuItem(title: "List Hidden Icons", action: #selector(listHiddenIcons), keyEquivalent: "")
         listItem.target = self
         menu.addItem(listItem)
+        let arrangeItem = NSMenuItem(title: "Arrange Icons…", action: #selector(arrangeIcons), keyEquivalent: "")
+        arrangeItem.target = self
+        menu.addItem(arrangeItem)
         menu.addItem(.separator())
         menu.addItem(shortcutMenuItem())
         let loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleOpenAtLogin), keyEquivalent: "")
@@ -729,6 +769,7 @@ final class DividerController: NSObject {
         )
         defaults.set(Double(position), forKey: key)
         defaults.set(true, forKey: Self.positionSeededKey)
+        showsArrangementHelp = true
     }
 
     /// Until the Accessibility permission is granted, checks for it every two seconds;
