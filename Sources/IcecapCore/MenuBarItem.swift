@@ -39,6 +39,20 @@ public struct MenuBarItem: Equatable, Sendable {
         return applicationName
     }
 
+    /// The names to list the items by, in their order: each item's `name`, followed by a
+    /// number counting from 1 in the items' order wherever several items share that name,
+    /// so that icons of one application without descriptions can be told apart.
+    public static func listedNames(of items: [MenuBarItem]) -> [String] {
+        var totals: [String: Int] = [:]
+        for item in items { totals[item.name, default: 0] += 1 }
+        var counts: [String: Int] = [:]
+        return items.map { item in
+            guard totals[item.name, default: 0] > 1 else { return item.name }
+            counts[item.name, default: 0] += 1
+            return "\(item.name) \(counts[item.name]!)"
+        }
+    }
+
     /// Whether the two values denote the same icon, whatever its current position.
     public func isSameItem(as other: MenuBarItem) -> Bool {
         processIdentifier == other.processIdentifier && index == other.index

@@ -93,6 +93,20 @@ private func item(_ processIdentifier: Int32, _ bundle: String?, x: CGFloat, wid
         #expect(subject.name == "Battery")
     }
 
+    @Test func sharedNamesAreNumberedInOrder() {
+        var described = item(12, "io.tailscale.ipn.macsys", x: 300)
+        described.accessibilityDescription = "Tailscale"
+        let items = [
+            item(10, "com.google.Chrome", x: 0, index: 0),
+            item(11, "com.trongduong.snapzy", x: 100),
+            item(10, "com.google.Chrome", x: 200, index: 1),
+            described,
+        ]
+        #expect(MenuBarItem.listedNames(of: items) == [
+            "com.google.Chrome 1", "com.trongduong.snapzy", "com.google.Chrome 2", "Tailscale",
+        ])
+    }
+
     @Test func identityIgnoresPosition() {
         let before = item(10, "com.google.Chrome", x: -2000, index: 1)
         let after = item(10, "com.google.Chrome", x: 714, index: 1)
