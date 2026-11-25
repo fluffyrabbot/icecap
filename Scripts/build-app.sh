@@ -2,16 +2,30 @@
 # Builds icecap.app into build/.
 # Usage: Scripts/build-app.sh [debug|release]
 # A release build is universal (arm64 and x86_64); a debug build is for this Mac only.
-# The bundle is signed with ICECAP_SIGN_IDENTITY when set, else with the first
-# "Apple Development" identity in the keychain, else ad hoc. A stable identity keeps the
-# Accessibility permission across rebuilds; an ad hoc signature loses it on every build.
-# Every signature uses the hardened runtime, which notarization requires; a Developer ID
-# signature also carries a secure timestamp.
+# The bundle is signed with APPLE_SIGNING_IDENTITY when set, else with the first
+# "Apple Development" identity in the keychain; with neither, the build stops. A stable
+# identity keeps the Accessibility permission across rebuilds. Every signature uses the
+# hardened runtime, which notarization requires; a Developer ID signature also carries a
+# secure timestamp.
 set -euo pipefail
 
 configuration="${1:-release}"
 repository="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repository"
+
+identities="$(security find-identity -v -p codesigning)"
+identity="${APPLE_SIGNING_IDENTITY:-}"
+if [[ -z "$identity" ]]; then
+  identity="$(sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' <<<"$identities" | head -n 1)"
+  [[ -n "$identity" ]] || {
+    echo "no \"Apple Development\" identity in the keychain; set APPLE_SIGNING_IDENTITY to a code signing identity" >&2
+    exit 1
+  }
+fi
+grep -qF "\"$identity\"" <<<"$identities" || {
+  echo "APPLE_SIGNING_IDENTITY \"$identity\" is not a valid code signing identity in the keychain" >&2
+  exit 1
+}
 
 architectures=()
 if [[ "$configuration" == "release" ]]; then
@@ -29,19 +43,13 @@ cp "$repository/Resources/Info.plist" "$bundle/Contents/Info.plist"
 cp "$repository/Resources/AppIcon.icns" "$bundle/Contents/Resources/AppIcon.icns"
 
 # The build number counts the commits, so that each release has a larger one.
-build_number="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+build_number="$(git rev-list --count HEAD)"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$bundle/Contents/Info.plist"
 
-identity="${ICECAP_SIGN_IDENTITY:-}"
-if [[ -z "$identity" ]]; then
-  identity="$(security find-identity -v -p codesigning 2>/dev/null \
-    | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)"
-fi
-identity="${identity:--}"
-signing_options=(--force --options runtime --sign "$identity" --identifier io.github.fluffyrabbot.icecap)
+signing_options=(--force --options runtime --sign "$identity")
 if [[ "$identity" == "Developer ID Application:"* ]]; then
   signing_options+=(--timestamp)
 fi
 codesign "${signing_options[@]}" "$bundle"
-codesign --verify --strict "$bundle"
+codesign --verify --deep --strict --verbose=2 "$bundle"
 echo "$bundle"

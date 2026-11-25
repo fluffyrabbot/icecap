@@ -100,10 +100,10 @@ swift test
 Scripts/build-app.sh debug
 ```
 
-`Scripts/build-app.sh` signs with `ICECAP_SIGN_IDENTITY` when set, otherwise with the
-first "Apple Development" identity in the keychain, otherwise ad hoc. A stable identity
-keeps the Accessibility permission across rebuilds. An ad hoc signature loses it on
-every build.
+`Scripts/build-app.sh` signs with `APPLE_SIGNING_IDENTITY` when set, otherwise with the
+first "Apple Development" identity in the keychain; with neither it stops. It never signs
+ad hoc: a stable identity keeps the Accessibility permission across rebuilds, and an ad
+hoc signature would lose it on every build.
 
 icecap writes its log under the subsystem `com.memorysynchub.icecap`:
 
@@ -113,25 +113,38 @@ icecap writes its log under the subsystem `com.memorysynchub.icecap`:
 
 ## Release
 
-`Scripts/release.sh` builds a universal, hardened-runtime `build/icecap-<version>.dmg`
-and the Homebrew cask `build/icecap.rb` from `Packaging/icecap.rb`. The version is
-`CFBundleShortVersionString` in `Resources/Info.plist`; the build number is the commit
-count. Run with any identity, it makes a disk image for testing on this Mac only.
+`Scripts/build-image.sh` builds a universal, hardened-runtime `build/icecap.app` and the
+disk image `build/icecap-<version>.dmg`, both signed with the identity `Scripts/build-app.sh`
+chooses. The image is not notarized, so with a development identity it opens on this Mac
+only. The version is `CFBundleShortVersionString` in `Resources/Info.plist`; the build
+number is the commit count.
 
-A public release needs a Developer ID identity and notarization credentials, stored once:
-
-```bash
-xcrun notarytool store-credentials icecap --apple-id <apple-id> --team-id <team-id>
-```
-
-Then, from a clean, pushed `main`:
+`Scripts/release.sh` makes the disk image for other Macs. It stops before building unless
+`APPLE_SIGNING_IDENTITY` names a "Developer ID Application" identity and
+`APPLE_NOTARY_PROFILE` names a stored notarytool profile:
 
 ```bash
-ICECAP_SIGN_IDENTITY="Developer ID Application: <name> (<team-id>)" ICECAP_NOTARY_PROFILE=icecap Scripts/release.sh --publish
+export APPLE_TEAM_ID=<team-id>
+export APPLE_SIGNING_IDENTITY="Developer ID Application: <name> (<team-id>)"
+export APPLE_NOTARY_PROFILE=memorysynchub
 ```
 
-This notarizes and staples the disk image, tags the commit `v<version>`, and creates the
-GitHub release. Copy `build/icecap.rb` to `Casks/icecap.rb` in `fluffyrabbot/homebrew-tap`
-to publish the cask.
+The profile is stored once, from an App Store Connect API key:
+
+```bash
+xcrun notarytool store-credentials memorysynchub --key <path to AuthKey_<key-id>.p8> --key-id <key-id> --issuer <issuer-id>
+```
+
+The script builds and signs the bundle and the disk image, notarizes and staples the
+image, checks both with `spctl`, and writes the Homebrew cask `build/icecap.rb` from
+`Packaging/icecap.rb`. From a clean, pushed `main`,
+
+```bash
+Scripts/release.sh --publish
+```
+
+also tags the commit `v<version>` and creates the GitHub release with the disk image.
+Copy `build/icecap.rb` to `Casks/icecap.rb` in `fluffyrabbot/homebrew-tap` to publish
+the cask.
 
 The icon is drawn by `swift Scripts/draw-icon.swift`, which writes `Resources/AppIcon.icns`.
