@@ -74,6 +74,16 @@ final class DividerController: NSObject {
     private var isShowingForPress = false
     private var pressTask: Task<Void, Never>?
     private var trustTimer: Timer?
+    static let panelShortcutKey = "PanelShortcut"
+    private var hotKey: HotKey?
+    /// Why the chosen shortcut could not be registered, when it could not.
+    private var hotKeyFailure: HotKey.RegistrationError?
+
+    /// The shortcut that opens the panel from any application, or none. Kept across restarts.
+    private var panelShortcut: PanelShortcut? {
+        get { PanelShortcut.resolved(storedValue: defaults.string(forKey: Self.panelShortcutKey)) }
+        set { defaults.set(PanelShortcut.storedValue(for: newValue), forKey: Self.panelShortcutKey) }
+    }
 
     override init() {
         super.init()
@@ -85,6 +95,7 @@ final class DividerController: NSObject {
     func start() async {
         await seedDividerPositionIfPossible()
         installDivider()
+        registerPanelShortcut()
         if !AccessibilityClient.isTrusted { watchForTrust() }
     }
 
@@ -450,6 +461,32 @@ final class DividerController: NSObject {
         return NSPoint(x: mouse.x, y: screen?.visibleFrame.maxY ?? mouse.y)
     }
 
+    // MARK: Keyboard shortcut
+
+    private func registerPanelShortcut() {
+        hotKey?.unregister()
+        hotKey = nil
+        hotKeyFailure = nil
+        guard let shortcut = panelShortcut else { return }
+        do {
+            hotKey = try HotKey(shortcut: shortcut) { [weak self] in self?.panelShortcutPressed() }
+        } catch let error as HotKey.RegistrationError {
+            Self.log.error("\(error.localizedDescription, privacy: .public)")
+            hotKeyFailure = error
+        } catch {
+            preconditionFailure("HotKey throws only RegistrationError: \(error)")
+        }
+    }
+
+    /// Opens the panel, whether or not the group fits, or closes it if it is open.
+    private func panelShortcutPressed() {
+        if panel.isVisible {
+            panel.close()
+        } else {
+            Task { await openPanel() }
+        }
+    }
+
     // MARK: Pressing a hidden icon
 
     private func press(_ entry: GroupPanel.Entry) {
@@ -521,7 +558,11 @@ final class DividerController: NSObject {
         )
         showItem.target = self
         menu.addItem(showItem)
+        let listItem = NSMenuItem(title: "List Hidden Icons", action: #selector(listHiddenIcons), keyEquivalent: "")
+        listItem.target = self
+        menu.addItem(listItem)
         menu.addItem(.separator())
+        menu.addItem(shortcutMenuItem())
         let loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleOpenAtLogin), keyEquivalent: "")
         loginItem.target = self
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -538,6 +579,43 @@ final class DividerController: NSObject {
         let bounds = button.bounds
         let location = NSPoint(x: bounds.minX, y: button.isFlipped ? bounds.maxY + 6 : bounds.minY - 6)
         menu.popUp(positioning: nil, at: location, in: button)
+    }
+
+    private func shortcutMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Keyboard Shortcut", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        if let hotKeyFailure {
+            let failure = NSMenuItem(title: hotKeyFailure.localizedDescription, action: nil, keyEquivalent: "")
+            failure.isEnabled = false
+            submenu.addItem(failure)
+            submenu.addItem(.separator())
+        }
+        let choices: [PanelShortcut?] = PanelShortcut.allCases + [nil]
+        for choice in choices {
+            let choiceItem = NSMenuItem(
+                title: choice?.title ?? "None",
+                action: #selector(choosePanelShortcut(_:)),
+                keyEquivalent: ""
+            )
+            choiceItem.target = self
+            choiceItem.representedObject = PanelShortcut.storedValue(for: choice)
+            choiceItem.state = choice == panelShortcut ? .on : .off
+            submenu.addItem(choiceItem)
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    @objc private func choosePanelShortcut(_ sender: NSMenuItem) {
+        guard let storedValue = sender.representedObject as? String else {
+            preconditionFailure("each shortcut item carries its stored value")
+        }
+        panelShortcut = PanelShortcut.resolved(storedValue: storedValue)
+        registerPanelShortcut()
+    }
+
+    @objc private func listHiddenIcons() {
+        Task { await openPanel() }
     }
 
     @objc private func toggleShowing() {

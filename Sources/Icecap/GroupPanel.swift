@@ -1,8 +1,11 @@
 import AppKit
+import IcecapCore
 
-/// The panel that drops from the divider and lists the icons of the group.
+/// The panel that drops from the divider and lists the icons of the group. It takes key
+/// status without activating icecap, so that the person can type to narrow the list,
+/// move through it with the arrow keys, choose with Return and close it with Escape.
 @MainActor
-final class GroupPanel: NSObject {
+final class GroupPanel: NSObject, NSSearchFieldDelegate {
     struct Entry {
         let accessible: AccessibleItem
         let icon: NSImage?
@@ -13,13 +16,27 @@ final class GroupPanel: NSObject {
         case entries([Entry], isShownInMenuBar: Bool)
     }
 
+    /// One row that can be chosen.
+    private enum Row {
+        case entry(Entry)
+        case showInMenuBar
+        case openAccessibilitySettings
+    }
+
     static let width: CGFloat = 260
+    private static let innerWidth = width - 12
 
     var onChoose: ((Entry) -> Void)?
     var onShowInMenuBar: (() -> Void)?
 
     private var window: GroupPanelWindow?
     private var monitors: [Any] = []
+    private var state = State.entries([], isShownInMenuBar: false)
+    private var searchField: NSSearchField?
+    private let rowStack = NSStackView()
+    private var rows: [Row] = []
+    private var rowViews: [GroupRow] = []
+    private var selection = RowSelection(rowCount: 0)
 
     var isVisible: Bool { window?.isVisible ?? false }
 
@@ -27,7 +44,9 @@ final class GroupPanel: NSObject {
     /// coordinates with a bottom-left origin.
     func show(state: State, at anchor: NSPoint) {
         close()
-        let content = makeContent(for: state)
+        self.state = state
+        let content = makeContent()
+        reloadRows()
         let size = content.fittingSize
         let screen = NSScreen.screens.first { $0.frame.insetBy(dx: 0, dy: -1).contains(anchor) } ?? NSScreen.main
         var origin = NSPoint(x: anchor.x - size.width / 2, y: anchor.y - size.height - 4)
@@ -49,10 +68,12 @@ final class GroupPanel: NSObject {
         window.hidesOnDeactivate = false
         window.title = "icecap group"
         window.contentView = content
-        window.onCancel = { [weak self] in self?.close() }
+        window.onCommand = { [weak self] command in self?.perform(command) ?? false }
+        window.onResignKey = { [weak self] in self?.close() }
+        self.window = window
         window.orderFrontRegardless()
         window.makeKey()
-        self.window = window
+        if let searchField { window.makeFirstResponder(searchField) }
         let mouseDown: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         if let global = NSEvent.addGlobalMonitorForEvents(matching: mouseDown, handler: { [weak self] _ in
             MainActor.assumeIsolated { self?.close() }
@@ -64,8 +85,11 @@ final class GroupPanel: NSObject {
     func close() {
         for monitor in monitors { NSEvent.removeMonitor(monitor) }
         monitors.removeAll()
-        window?.orderOut(nil)
-        window = nil
+        // Cleared before ordering out, which resigns key status and calls back here.
+        guard let window else { return }
+        self.window = nil
+        searchField = nil
+        window.orderOut(nil)
     }
 
     static func openAccessibilitySettings() {
@@ -74,9 +98,118 @@ final class GroupPanel: NSObject {
         }
     }
 
+    // MARK: Keyboard
+
+    /// Performs a command from the search field or the panel. Returns whether it was handled.
+    private func perform(_ command: Selector) -> Bool {
+        switch command {
+        case #selector(NSResponder.moveDown(_:)):
+            selection.moveDown()
+            updateHighlight()
+        case #selector(NSResponder.moveUp(_:)):
+            selection.moveUp()
+            updateHighlight()
+        case #selector(NSResponder.insertNewline(_:)):
+            if let index = selection.index { choose(rows[index]) } else { NSSound.beep() }
+        case #selector(NSResponder.cancelOperation(_:)):
+            if let searchField, !searchField.stringValue.isEmpty {
+                searchField.stringValue = ""
+                reloadRows()
+            } else {
+                close()
+            }
+        default:
+            return false
+        }
+        return true
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        reloadRows()
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        perform(commandSelector)
+    }
+
+    // MARK: Rows
+
+    private func choose(_ row: Row) {
+        switch row {
+        case .entry(let entry):
+            onChoose?(entry)
+        case .showInMenuBar:
+            close()
+            onShowInMenuBar?()
+        case .openAccessibilitySettings:
+            close()
+            Self.openAccessibilitySettings()
+        }
+    }
+
+    /// Lists the rows that match the search field, selects the first and fits the window
+    /// to them, keeping its top edge in place.
+    private func reloadRows() {
+        let query = searchField?.stringValue ?? ""
+        switch state {
+        case .needsAccessibility:
+            rows = [.openAccessibilitySettings]
+        case .entries(let entries, let isShownInMenuBar):
+            let matching = ItemSearch.matches(entries, query: query) { entry in
+                [entry.accessible.item.name, entry.accessible.item.applicationName]
+            }
+            rows = matching.map(Row.entry)
+            if query.isEmpty, !entries.isEmpty, !isShownInMenuBar { rows.append(.showInMenuBar) }
+        }
+        for view in rowStack.arrangedSubviews { view.removeFromSuperview() }
+        rowViews = rows.enumerated().map { index, row in
+            let view = GroupRow(title: title(of: row), icon: icon(of: row)) { [weak self] in
+                guard let self else { return }
+                self.choose(self.rows[index])
+            }
+            view.onHover = { [weak self] in
+                self?.selection.select(index)
+                self?.updateHighlight()
+            }
+            return view
+        }
+        for view in rowViews { rowStack.addArrangedSubview(fullWidth(view)) }
+        if rows.isEmpty, !query.isEmpty {
+            rowStack.addArrangedSubview(note("No hidden icon matches \u{201C}\(query)\u{201D}."))
+        }
+        selection = RowSelection(rowCount: rows.count)
+        updateHighlight()
+        if let window, let content = window.contentView {
+            let size = content.fittingSize
+            var frame = window.frame
+            frame.origin.y = frame.maxY - size.height
+            frame.size = size
+            window.setFrame(frame, display: true)
+        }
+    }
+
+    private func updateHighlight() {
+        for (index, view) in rowViews.enumerated() {
+            view.isHighlighted = index == selection.index
+        }
+    }
+
+    private func title(of row: Row) -> String {
+        switch row {
+        case .entry(let entry): entry.accessible.item.name
+        case .showInMenuBar: "Show in Menu Bar"
+        case .openAccessibilitySettings: "Open Accessibility Settings…"
+        }
+    }
+
+    private func icon(of row: Row) -> NSImage? {
+        if case .entry(let entry) = row { return entry.icon }
+        return nil
+    }
+
     // MARK: Content
 
-    private func makeContent(for state: State) -> NSView {
+    private func makeContent() -> NSView {
         let background = NSVisualEffectView()
         background.material = .menu
         background.state = .active
@@ -88,7 +221,7 @@ final class GroupPanel: NSObject {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 2
+        stack.spacing = 4
         stack.edgeInsets = NSEdgeInsets(top: 8, left: 6, bottom: 8, right: 6)
         stack.translatesAutoresizingMaskIntoConstraints = false
         background.addSubview(stack)
@@ -100,54 +233,34 @@ final class GroupPanel: NSObject {
             background.widthAnchor.constraint(equalToConstant: Self.width),
         ])
 
+        searchField = nil
         switch state {
         case .needsAccessibility:
             stack.addArrangedSubview(note("icecap needs the Accessibility permission to list and open hidden icons."))
-            stack.addArrangedSubview(fullWidth(GroupRow(title: "Open Accessibility Settings…", icon: nil) { [weak self] in
-                self?.close()
-                Self.openAccessibilitySettings()
-            }, in: stack))
-        case .entries(let entries, let isShownInMenuBar):
+        case .entries(let entries, _):
             if entries.isEmpty {
                 stack.addArrangedSubview(note("No icons are hidden. Hold ⌘ and drag icons to the left of the chevron to hide them."))
             } else {
-                stack.addArrangedSubview(heading("Hidden icons"))
-                for entry in entries {
-                    let row = GroupRow(title: entry.accessible.item.name, icon: entry.icon) { [weak self] in
-                        self?.onChoose?(entry)
-                    }
-                    stack.addArrangedSubview(fullWidth(row, in: stack))
-                }
-                if !isShownInMenuBar {
-                    stack.addArrangedSubview(fullWidth(GroupRow(title: "Show in Menu Bar", icon: nil) { [weak self] in
-                        self?.close()
-                        self?.onShowInMenuBar?()
-                    }, in: stack))
-                }
+                let field = NSSearchField()
+                field.placeholderString = "Filter hidden icons"
+                field.setAccessibilityLabel("Filter hidden icons")
+                field.focusRingType = .none
+                field.delegate = self
+                searchField = field
+                stack.addArrangedSubview(fullWidth(field))
             }
         }
+        rowStack.orientation = .vertical
+        rowStack.alignment = .leading
+        rowStack.spacing = 2
+        stack.addArrangedSubview(rowStack)
         return background
     }
 
-    private func fullWidth(_ view: NSView, in stack: NSStackView) -> NSView {
+    private func fullWidth(_ view: NSView) -> NSView {
         view.translatesAutoresizingMaskIntoConstraints = false
-        view.widthAnchor.constraint(equalToConstant: Self.width - stack.edgeInsets.left - stack.edgeInsets.right).isActive = true
+        view.widthAnchor.constraint(equalToConstant: Self.innerWidth).isActive = true
         return view
-    }
-
-    private func heading(_ text: String) -> NSView {
-        let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        label.textColor = .secondaryLabelColor
-        let container = NSView()
-        label.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 2),
-            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2),
-        ])
-        return container
     }
 
     private func note(_ text: String) -> NSView {
@@ -162,29 +275,44 @@ final class GroupPanel: NSObject {
             label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             label.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
             label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -4),
-            container.widthAnchor.constraint(equalToConstant: Self.width - 12),
+            container.widthAnchor.constraint(equalToConstant: Self.innerWidth),
         ])
         return container
     }
 }
 
-/// A borderless panel that can take key status without activating the application, so
-/// that Escape closes it.
+/// A borderless panel that can take key status without activating the application. Key
+/// commands that no view handles, Escape among them, go to `onCommand`.
 final class GroupPanelWindow: NSPanel {
-    var onCancel: (() -> Void)?
+    var onCommand: ((Selector) -> Bool)?
+    var onResignKey: (() -> Void)?
 
     override var canBecomeKey: Bool { true }
 
+    override func keyDown(with event: NSEvent) {
+        interpretKeyEvents([event])
+    }
+
+    override func doCommand(by selector: Selector) {
+        if onCommand?(selector) != true { super.doCommand(by: selector) }
+    }
+
     override func cancelOperation(_ sender: Any?) {
-        onCancel?()
+        _ = onCommand?(#selector(cancelOperation(_:)))
+    }
+
+    override func resignKey() {
+        super.resignKey()
+        onResignKey?()
     }
 }
 
-/// One row of the panel: an icon and a name, highlighted under the pointer, chosen by a
-/// click or by the Accessibility press action.
+/// One row of the panel: an icon and a name, highlighted while selected, chosen by a
+/// click or by the Accessibility press action. The pointer entering it selects it.
 final class GroupRow: NSView {
     private let action: () -> Void
-    private var isHighlighted = false {
+    var onHover: (() -> Void)?
+    var isHighlighted = false {
         didSet { needsDisplay = true; label.textColor = isHighlighted ? .selectedMenuItemTextColor : .labelColor }
     }
     private let label: NSTextField
@@ -236,8 +364,7 @@ final class GroupRow: NSView {
         ))
     }
 
-    override func mouseEntered(with event: NSEvent) { isHighlighted = true }
-    override func mouseExited(with event: NSEvent) { isHighlighted = false }
+    override func mouseEntered(with event: NSEvent) { onHover?() }
     override func mouseDown(with event: NSEvent) {}
 
     override func mouseUp(with event: NSEvent) {

@@ -46,8 +46,9 @@ can be removed with `tccutil reset Accessibility io.github.fluffyrabbot.icecap`.
 | Action | Effect |
 |---|---|
 | Click the chevron | Shows the group in the menu bar wherever it fits beside the front application's menus and any camera housing. Otherwise lists the hidden icons: pick one to show the group, open that icon's menu, and hide the group again once the menu closes. Click again to hide the group. |
-| ⌥-click the chevron | Lists the hidden icons, whether or not the group fits. |
-| Right-click the chevron | Show or hide icons, open at login, Accessibility settings, quit. |
+| ⌥-click the chevron, or press ⌃⌥⌘Space in any application | Lists the hidden icons, whether or not the group fits. Press the shortcut again to close the list. |
+| Type in the list | Narrows it to the icons whose names match. ↑ and ↓ move the selection, Return opens the selected icon's menu, Escape clears the filter and then closes the list. |
+| Right-click the chevron | Show or hide icons, list hidden icons, choose the keyboard shortcut (⌃⌥⌘Space, ⌃⌥⌘H, ⌃⌥⌘M or none), open at login, Accessibility settings, quit. |
 | Show the group, then ⌘-drag an icon across the chevron | Moves the icon into or out of the group. |
 | ⌘-drag the chevron | Moves the group's boundary. icecap restarts once to follow it. |
 
@@ -71,7 +72,10 @@ until the chevron is clicked again. The group's width is measured only while it 
 hidden, because the icons that do not fit on a narrow display are not laid out.
 
 The panel lists the group's icons from the Accessibility API (`AXExtrasMenuBar`), by
-application icon and name. Choosing one shrinks the spacer and waits until the icon
+application icon and name. It takes key status without activating icecap, so the
+application in front keeps its menus while the list is open. The keyboard shortcut is
+registered with Carbon's `RegisterEventHotKey`, which needs no permission; if another
+application holds the same shortcut, the Keyboard Shortcut submenu says so. Choosing one shrinks the spacer and waits until the icon
 lies on a display, then presses it with `AXPress`. icecap then watches the window list
 for the icon's menu and hides the group once the menu has closed.
 
