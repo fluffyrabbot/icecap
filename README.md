@@ -45,11 +45,12 @@ can be removed with `tccutil reset Accessibility io.github.fluffyrabbot.icecap`.
 
 | Action | Effect |
 |---|---|
-| Click the chevron | Shows the group in the menu bar wherever it fits beside the front application's menus and any camera housing. Otherwise lists the hidden icons: pick one to show the group, open that icon's menu, and hide the group again once the menu closes. Click again to hide the group. |
+| Click the chevron | Shows the group in the menu bar if it fits beside the front application's menus and any camera housing, and hides it again once the pointer has been out of the menu bar for a second with no menu open. Otherwise lists the hidden icons: pick one to show the group, open that icon's menu, and hide the group again once the menu closes. Click again to hide the group at once. |
 | ⌥-click the chevron, or press ⌃⌥⌘Space in any application | Lists the hidden icons, whether or not the group fits. Press the shortcut again to close the list. |
 | Type in the list | Narrows it to the icons whose names match. ↑ and ↓ move the selection, Return opens the selected icon's menu, Escape clears the filter and then closes the list. |
-| Right-click the chevron | Show or hide icons, list hidden icons, choose the keyboard shortcut (⌃⌥⌘Space, ⌃⌥⌘H, ⌃⌥⌘M or none), open at login, Accessibility settings, quit. |
+| Right-click the chevron | Always show the group where it fits, list hidden icons, choose the keyboard shortcut (⌃⌥⌘Space, ⌃⌥⌘H, ⌃⌥⌘M or none), open at login, Accessibility settings, quit. |
 | Show the group, then ⌘-drag an icon across the chevron | Moves the icon into or out of the group. |
+| Choose Always Show Where It Fits | Keeps the group shown whenever it fits, and hides it where it does not, until the item is chosen again or the chevron is clicked while the group is shown. |
 | ⌘-drag the chevron | Moves the group's boundary. icecap restarts once to follow it. |
 
 ## How it works
@@ -64,28 +65,37 @@ On a click, icecap measures the group from the icons' Accessibility frames, whic
 their widths and spacing while pushed off the display. The group fits if it would end at
 least 8 points right of the front application's last menu title and, on a display with a
 camera housing, right of the housing (`NSScreen.auxiliaryTopRightArea`). A click that
-finds room starts showing the group wherever it fits. From then on icecap checks the fit
-again when another application comes to the front, when one starts or ends, when the
-displays change, and every second, which catches the active menu bar moving to another
-display. It hides the group where it no longer fits and shows it again where it does,
-until the chevron is clicked again. The group's width is measured only while it is
-hidden, because the icons that do not fit on a narrow display are not laid out.
+finds room starts a peek. Five times a second icecap checks where the pointer is, and
+the peek ends once the pointer has stayed out of the menu bar for a second (three, if
+the peek began away from it, as from the panel) while no menu is open. A menu counts
+as open while any pop-up menu is on screen, or a raised window of one of the group's
+applications begins just below the top of a display, as a popover does.
+
+With Always Show Where It Fits chosen, icecap checks the fit again when another
+application comes to the front, when one starts or ends, when the displays change, and
+every second, which catches the active menu bar moving to another display. It hides the
+group where it no longer fits and shows it again where it does. The group's width is
+measured only while it is hidden, because the icons that do not fit on a narrow display
+are not laid out.
 
 The panel lists the group's icons from the Accessibility API (`AXExtrasMenuBar`), by
-application icon and name. It takes key status without activating icecap, so the
-application in front keeps its menus while the list is open. The keyboard shortcut is
-registered with Carbon's `RegisterEventHotKey`, which needs no permission; if another
-application holds the same shortcut, the Keyboard Shortcut submenu says so. Choosing one shrinks the spacer and waits until the icon
-lies on a display, then presses it with `AXPress`. icecap then watches the window list
-for the icon's menu and hides the group once the menu has closed.
+application icon and name. Choosing one shrinks the spacer and waits until the icon lies
+on a display, then presses it with `AXPress`. icecap then watches the window list for
+the icon's menu and hides the group once the menu has closed.
 
-The pure logic (grouping, placement, menu detection, the reveal session) is in
+The panel takes key status without activating icecap, so the application in front keeps
+its menus while the list is open. The keyboard shortcut is registered with Carbon's
+`RegisterEventHotKey`, which needs no permission; if another application holds the same
+shortcut, the Keyboard Shortcut submenu says so.
+
+The pure logic (grouping, placement, menu detection, the reveal and peek sessions, the
+panel's filter) is in
 `Sources/IcecapCore` and is unit tested. The AppKit application is in `Sources/Icecap`.
 
 ## Limitations
 
-- One group, shown or hidden on every display at once. Shown where it fits, it follows
-  the display whose menu bar is active, and the other displays show the same.
+- One group, shown or hidden on every display at once. Always shown where it fits, it
+  follows the display whose menu bar is active, and the other displays show the same.
 - Icons in the panel show their application's icon, not their live picture,
   because the system will not capture an icon that has been pushed off the display.
 - macOS does not reliably place a status item added again within a running process, so

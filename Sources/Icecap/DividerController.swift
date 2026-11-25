@@ -41,10 +41,9 @@ final class DividerController: NSObject {
     private var spacerPlacementTask: Task<Void, Never>?
     private var dividerMoveObserver: NSObjectProtocol?
     private let panel = GroupPanel()
-    static let showsGroupKey = "ShowsGroup"
-    static let showsGroupWhereItFitsKey = "ShowsGroupWhereItFits"
-    /// How often the fit is checked again while the group is shown where it fits. Each
-    /// check reads only this application's own icons and the front application's menus.
+    static let alwaysShowsGroupWhereItFitsKey = "AlwaysShowsGroupWhereItFits"
+    /// How often the fit is checked again while the group is always shown where it fits.
+    /// Each check reads only this application's own icons and the front application's menus.
     static let fitCheckInterval: TimeInterval = 1
     static let restartTimesKey = "RestartTimes"
     /// More restarts than this within `restartWindow` mean that restarting does not help.
@@ -52,21 +51,27 @@ final class DividerController: NSObject {
     static let restartWindow: TimeInterval = 60
     private var isRestarting = false
 
-    /// Whether the person chose to show the group in the menu bar. Kept across restarts.
-    private var isShowingByChoice: Bool {
-        get { defaults.bool(forKey: Self.showsGroupKey) }
-        set { defaults.set(newValue, forKey: Self.showsGroupKey) }
+    /// Whether the person chose, in the context menu, to show the group whenever it fits
+    /// on the display whose menu bar is active. Kept across restarts.
+    private var alwaysShowsGroupWhereItFits: Bool {
+        get { defaults.bool(forKey: Self.alwaysShowsGroupWhereItFitsKey) }
+        set { defaults.set(newValue, forKey: Self.alwaysShowsGroupWhereItFitsKey) }
     }
-    /// Whether the person chose, by clicking the chevron, to show the group whenever it
-    /// fits on the display whose menu bar is active. Kept across restarts.
-    private var showsGroupWhereItFits: Bool {
-        get { defaults.bool(forKey: Self.showsGroupWhereItFitsKey) }
-        set { defaults.set(newValue, forKey: Self.showsGroupWhereItFitsKey) }
-    }
+    /// How often a peek checks whether the pointer has left the menu bar.
+    static let peekCheckInterval = Duration.milliseconds(200)
+    /// The peek under way, if any: the group shown on request until the pointer leaves the
+    /// menu bar while no menu is open.
+    private var peekTask: Task<Void, Never>?
+    private var isPeeking: Bool { peekTask != nil }
+    /// The processes that own the group's icons, as last listed in the panel.
+    private var listedGroupProcesses: Set<Int32> = []
     /// Whether the group fit when last checked.
     private var doesGroupFit = false
     /// The group's width as last measured while it was hidden; see `Divider.groupFits`.
     private var hiddenGroupWidth: CGFloat = 0
+    /// Whether `hiddenGroupWidth` has been measured since launch. Until it has, every fit
+    /// check measures the group.
+    private var isGroupMeasured = false
     private var fitTimer: Timer?
     private var fitObservers: [(NotificationCenter, NSObjectProtocol)] = []
     private var isCheckingFit = false
@@ -88,8 +93,11 @@ final class DividerController: NSObject {
     override init() {
         super.init()
         panel.onChoose = { [weak self] entry in self?.press(entry) }
-        panel.onShowInMenuBar = { [weak self] in self?.setShowingByChoice(true) }
-        if showsGroupWhereItFits { watchFit() }
+        panel.onShowInMenuBar = { [weak self] in
+            guard let self else { return }
+            self.startPeek(groupProcesses: self.listedGroupProcesses)
+        }
+        if alwaysShowsGroupWhereItFits { watchFit() }
     }
 
     func start() async {
@@ -241,8 +249,10 @@ final class DividerController: NSObject {
         }
     }
 
-    /// Whether the group is shown because the person asked for it, by choice or where it fits.
-    private var isShownOnRequest: Bool { isShowingByChoice || (showsGroupWhereItFits && doesGroupFit) }
+    /// Whether the group is shown because the person asked for it: for a peek, or always
+    /// where it fits.
+    private var isShownOnRequest: Bool { isPeeking || isAlwaysShownWhereItFits }
+    private var isAlwaysShownWhereItFits: Bool { alwaysShowsGroupWhereItFits && doesGroupFit }
     private var isShowing: Bool { isShownOnRequest || isShowingForPress }
 
     private func applyLength() {
@@ -266,21 +276,62 @@ final class DividerController: NSObject {
         dividerItem?.button?.image = image
     }
 
-    private func setShowingByChoice(_ showing: Bool) {
-        isShowingByChoice = showing
+    private func setAlwaysShowsGroupWhereItFits(_ showing: Bool) {
+        alwaysShowsGroupWhereItFits = showing
+        if showing {
+            watchFit()
+            Task { await checkFit(measuringGroup: true) }
+        } else {
+            stopWatchingFit()
+            doesGroupFit = false
+        }
         applyLength()
     }
 
-    /// Hides the group, and stops showing it where it fits.
-    private func hideOnRequest() {
-        isShowingByChoice = false
-        setShowingWhereItFits(false)
+    // MARK: Peek
+
+    /// Shows the group until the pointer has stayed away from the menu bar for a moment
+    /// while no menu is open; see `PeekSession`.
+    ///
+    /// - Parameter groupProcesses: The processes that own the group's icons, whose
+    ///   popovers keep the peek going as menus do.
+    private func startPeek(groupProcesses: Set<Int32>) {
+        peekTask?.cancel()
+        peekTask = Task { [weak self] in
+            var session = PeekSession(startTime: ProcessInfo.processInfo.systemUptime)
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.peekCheckInterval)
+                guard let self, !Task.isCancelled else { return }
+                let isPointerPresent = self.panel.isVisible || Self.isPointerInMenuBar
+                let isMenuOpen = !isPointerPresent && MenuDetection.isAnyMenuOpen(
+                    windows: WindowServer.onScreenWindows(),
+                    processIdentifiers: groupProcesses,
+                    displays: WindowServer.displayBounds()
+                )
+                let time = ProcessInfo.processInfo.systemUptime
+                if session.observe(isPointerPresent: isPointerPresent, isMenuOpen: isMenuOpen, time: time) {
+                    Self.log.info("peek ended: the pointer left the menu bar")
+                    self.endPeek()
+                    return
+                }
+            }
+        }
+        applyLength()
     }
 
-    private func setShowingWhereItFits(_ showing: Bool) {
-        showsGroupWhereItFits = showing
-        if showing { watchFit() } else { stopWatchingFit() }
+    private func endPeek() {
+        peekTask?.cancel()
+        peekTask = nil
         applyLength()
+    }
+
+    /// Whether the pointer lies in the menu bar of any display.
+    private static var isPointerInMenuBar: Bool {
+        let pointer = NSEvent.mouseLocation
+        return NSScreen.screens.contains { screen in
+            let menuBarHeight = max(NSStatusBar.system.thickness, screen.frame.maxY - screen.visibleFrame.maxY)
+            return screen.frame.contains(pointer) && pointer.y >= screen.frame.maxY - menuBarHeight
+        }
     }
 
     @objc private func dividerClicked(_ sender: Any?) {
@@ -291,17 +342,19 @@ final class DividerController: NSObject {
             panel.close()
         } else if event?.modifierFlags.contains(.option) == true {
             Task { await openPanel() }
-        } else if isShownOnRequest {
-            hideOnRequest()
+        } else if isPeeking {
+            endPeek()
+        } else if isAlwaysShownWhereItFits {
+            setAlwaysShowsGroupWhereItFits(false)
         } else {
-            Task { await showGroupOrOpenPanel() }
+            Task { await peekOrOpenPanel() }
         }
     }
 
-    /// Shows the group in the menu bar if it fits on the display whose menu bar holds the
-    /// divider, beside the front application's menus and any camera housing; otherwise
-    /// opens the panel.
-    private func showGroupOrOpenPanel() async {
+    /// Peeks at the group if it fits on the display whose menu bar holds the divider,
+    /// beside the front application's menus and any camera housing; otherwise opens the
+    /// panel.
+    private func peekOrOpenPanel() async {
         guard AccessibilityClient.isTrusted else {
             panel.show(state: .needsAccessibility, at: dividerAnchor())
             return
@@ -310,11 +363,10 @@ final class DividerController: NSObject {
         if let (group, dividerFrame) = group(of: items),
            let statusAreaMinX = await statusAreaMinX(around: dividerFrame) {
             let width = Divider.groupWidth(group)
-            if !isShowing { hiddenGroupWidth = width }
+            if !isShowing { recordHiddenGroupWidth(of: group) }
             if Divider.groupFits(width: max(width, hiddenGroupWidth), dividerFrame: dividerFrame, statusAreaMinX: statusAreaMinX) {
-                Self.log.info("group of \(group.count) fits; showing it where it fits")
-                doesGroupFit = true
-                setShowingWhereItFits(true)
+                Self.log.info("group of \(group.count) fits; peeking at it")
+                startPeek(groupProcesses: Set(group.map(\.processIdentifier)))
                 return
             }
         }
@@ -363,38 +415,44 @@ final class DividerController: NSObject {
         fitObservers = []
     }
 
-    /// Shows or hides the group, while it is shown where it fits, as it now fits or not
-    /// on the display whose menu bar is active.
+    /// Shows or hides the group, while it is always shown where it fits, as it now fits
+    /// or not on the display whose menu bar is active.
     ///
     /// - Parameter measuringGroup: Whether to read every application's icons, which takes
     ///   up to two seconds, to measure the group again; otherwise the last width measured
     ///   while the group was hidden is used.
     private func checkFit(measuringGroup: Bool) async {
-        guard showsGroupWhereItFits, isSpacerPlaced, !isShowingForPress, !isCheckingFit,
+        guard alwaysShowsGroupWhereItFits, isSpacerPlaced, !isShowingForPress, !isCheckingFit,
               AccessibilityClient.isTrusted else { return }
         isCheckingFit = true
         defer { isCheckingFit = false }
         let ownIdentifier = ProcessInfo.processInfo.processIdentifier
+        let measuringGroup = measuringGroup || !isGroupMeasured
         let items = await AccessibilityClient.items(ofProcess: measuringGroup ? nil : ownIdentifier)
         guard let (group, dividerFrame) = group(of: items),
               let statusAreaMinX = await statusAreaMinX(around: dividerFrame),
-              showsGroupWhereItFits, !isShowingForPress
+              alwaysShowsGroupWhereItFits, !isShowingForPress
         else { return }
+        if measuringGroup, !isShowing { recordHiddenGroupWidth(of: group) }
+        guard isGroupMeasured else { return }
         var width = hiddenGroupWidth
-        if measuringGroup {
-            let measured = Divider.groupWidth(group)
-            if isShowing {
-                width = max(width, measured)
-            } else {
-                hiddenGroupWidth = measured
-                width = measured
-            }
-        }
+        if measuringGroup, isShowing { width = max(width, Divider.groupWidth(group)) }
         let fits = Divider.groupFits(width: width, dividerFrame: dividerFrame, statusAreaMinX: statusAreaMinX)
         guard fits != doesGroupFit else { return }
         Self.log.info("group of width \(width) \(fits ? "fits again; showing it" : "no longer fits; hiding it", privacy: .public)")
         doesGroupFit = fits
         applyLength()
+    }
+
+    /// Records the width of the hidden group, unless the menu bar is still being laid out
+    /// again and the measurement would be wrong; see `Divider.isGroupPushedOff`.
+    private func recordHiddenGroupWidth(of group: [MenuBarItem]) {
+        guard Divider.isGroupPushedOff(group, displays: WindowServer.displayBounds()) else {
+            Self.log.info("group not yet pushed off the displays; measuring it again later")
+            return
+        }
+        hiddenGroupWidth = Divider.groupWidth(group)
+        isGroupMeasured = true
     }
 
     /// The left bound of the status area on the display that holds the divider's frame,
@@ -422,7 +480,9 @@ final class DividerController: NSObject {
     }
 
     private func showPanel(listing items: [AccessibleItem]) {
-        panel.show(state: .entries(groupEntries(of: items), isShownInMenuBar: isShownOnRequest), at: dividerAnchor())
+        let entries = groupEntries(of: items)
+        listedGroupProcesses = Set(entries.map(\.accessible.item.processIdentifier))
+        panel.show(state: .entries(entries, isShownInMenuBar: isShownOnRequest), at: dividerAnchor())
     }
 
     /// The group's icons, left to right, and the divider's frame, as the Accessibility
@@ -551,13 +611,14 @@ final class DividerController: NSObject {
         panel.close()
         guard let button = dividerItem?.button else { return }
         let menu = NSMenu()
-        let showItem = NSMenuItem(
-            title: isShownOnRequest ? "Hide Icons" : "Show Hidden Icons",
-            action: #selector(toggleShowing),
+        let alwaysItem = NSMenuItem(
+            title: "Always Show Where It Fits",
+            action: #selector(toggleAlwaysShowsGroupWhereItFits),
             keyEquivalent: ""
         )
-        showItem.target = self
-        menu.addItem(showItem)
+        alwaysItem.target = self
+        alwaysItem.state = alwaysShowsGroupWhereItFits ? .on : .off
+        menu.addItem(alwaysItem)
         let listItem = NSMenuItem(title: "List Hidden Icons", action: #selector(listHiddenIcons), keyEquivalent: "")
         listItem.target = self
         menu.addItem(listItem)
@@ -618,8 +679,8 @@ final class DividerController: NSObject {
         Task { await openPanel() }
     }
 
-    @objc private func toggleShowing() {
-        if isShownOnRequest { hideOnRequest() } else { setShowingByChoice(true) }
+    @objc private func toggleAlwaysShowsGroupWhereItFits() {
+        setAlwaysShowsGroupWhereItFits(!alwaysShowsGroupWhereItFits)
     }
 
     @objc private func toggleOpenAtLogin() {
