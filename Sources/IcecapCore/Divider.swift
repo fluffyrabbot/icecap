@@ -24,11 +24,11 @@ public enum Divider {
     public static func groupItems(
         _ items: [MenuBarItem],
         dividerFrame: CGRect,
-        excludingProcess processIdentifier: Int32
+        excludingProcesses processIdentifiers: Set<Int32>
     ) -> [MenuBarItem] {
         items
             .filter { item in
-                item.processIdentifier != processIdentifier
+                !processIdentifiers.contains(item.processIdentifier)
                     && item.isLaidOut
                     && isOnSameRow(item.frame, dividerFrame)
                     && item.frame.maxX <= dividerFrame.minX + boundaryTolerance

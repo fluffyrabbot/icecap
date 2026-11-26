@@ -26,7 +26,14 @@ private func item(_ processIdentifier: Int32, _ bundle: String?, x: CGFloat, wid
 
     @Test func groupHoldsTheIconsLeftOfTheDivider() {
         let divider = CGRect(x: 973, y: 0, width: 38, height: 33)
-        let group = Divider.groupItems(others + [item(1, "icecap", x: 973)], dividerFrame: divider, excludingProcess: 1)
+        let group = Divider.groupItems(others + [item(1, "icecap", x: 973)], dividerFrame: divider, excludingProcesses: [1])
+        #expect(group.map(\.processIdentifier) == [10, 11, 12])
+    }
+
+    @Test func theSpacersIconIsLeftOutOfTheGroupWithIcecaps() {
+        let divider = CGRect(x: 973, y: 0, width: 38, height: 33)
+        let spacer = item(2, "com.memorysynchub.icecap.spacer", x: 973 - 5_000, width: 5_000)
+        let group = Divider.groupItems(others + [spacer], dividerFrame: divider, excludingProcesses: [1, 2])
         #expect(group.map(\.processIdentifier) == [10, 11, 12])
     }
 
@@ -37,7 +44,7 @@ private func item(_ processIdentifier: Int32, _ bundle: String?, x: CGFloat, wid
             if member.frame.maxX <= 973 { moved.frame.origin.x -= 5_000 }
             return moved
         }
-        let group = Divider.groupItems(pushedLeft, dividerFrame: divider, excludingProcess: 1)
+        let group = Divider.groupItems(pushedLeft, dividerFrame: divider, excludingProcesses: [1])
         #expect(group.map(\.processIdentifier) == [10, 11, 12])
     }
 
@@ -47,13 +54,13 @@ private func item(_ processIdentifier: Int32, _ bundle: String?, x: CGFloat, wid
         otherDisplay.frame.origin.y = -64
         var notLaidOut = item(21, "com.apple.controlcenter", x: 0)
         notLaidOut.frame.size = .zero
-        let group = Divider.groupItems([otherDisplay, notLaidOut], dividerFrame: divider, excludingProcess: 1)
+        let group = Divider.groupItems([otherDisplay, notLaidOut], dividerFrame: divider, excludingProcesses: [1])
         #expect(group.isEmpty)
     }
 
     @Test func groupIsOrderedLeftToRight() {
         let divider = CGRect(x: 973, y: 0, width: 38, height: 33)
-        let group = Divider.groupItems(others.reversed(), dividerFrame: divider, excludingProcess: 1)
+        let group = Divider.groupItems(others.reversed(), dividerFrame: divider, excludingProcesses: [1])
         #expect(group.map(\.frame.minX) == [714, 785, 935])
     }
 }

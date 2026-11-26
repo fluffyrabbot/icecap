@@ -4,13 +4,13 @@ import OSLog
 import ServiceManagement
 
 /// Owns the divider, the narrow status item that shows the chevron, and the spacer, the
-/// invisible status item kept immediately left of it. The spacer hides the icons to its
-/// left; the divider shows them on request and opens the panel that lists them.
+/// invisible status item kept immediately left of it by the `icecap-spacer` helper. The
+/// spacer hides the icons to its left; the divider shows them on request and opens the
+/// panel that lists them.
 @MainActor
 final class DividerController: NSObject {
     static let log = Logger(subsystem: "com.memorysynchub.icecap", category: "divider")
     static let dividerAutosaveName = "icecap"
-    static let spacerGenerationKey = "SpacerGeneration"
     static let positionSeededKey = "PreferredPositionSeeded"
     /// Where the divider goes when no better position can be computed: far enough from
     /// the right edge to clear most system icons, near enough to clear a notch.
@@ -22,23 +22,21 @@ final class DividerController: NSObject {
         "NSStatusItem Preferred Position \(autosaveName)"
     }
 
-    static func visibilityKey(_ autosaveName: String) -> String {
-        "NSStatusItem Visible \(autosaveName)"
-    }
-
-    /// The spacer's autosave name. Each placement of the spacer takes a new name: a status
-    /// item added again under a name already used in this process is placed where the
-    /// system last saw that name, whatever preferred position is then recorded.
-    private var spacerAutosaveName: String {
-        "icecap-spacer-\(defaults.integer(forKey: Self.spacerGenerationKey))"
-    }
-
     private let defaults = UserDefaults.standard
     private var dividerItem: NSStatusItem?
-    private var spacerItem: NSStatusItem?
+    /// The helper that holds the spacer, once started.
+    private var spacer: SpacerProcess?
     /// Whether the spacer has been placed beside the divider and may widen.
     private var isSpacerPlaced = false
-    private var spacerPlacementTask: Task<Void, Never>?
+    /// The wait before the first spacer starts, or a restart of the spacer under way.
+    private var spacerStartTask: Task<Void, Never>?
+    /// When the spacer was restarted, as system uptimes, so that restarts that do not help
+    /// can be stopped.
+    private var spacerRestartTimes: [TimeInterval] = []
+    /// More restarts of the spacer than this within `spacerRestartWindow` mean that
+    /// restarting does not help.
+    static let spacerRestartLimit = 3
+    static let spacerRestartWindow: TimeInterval = 60
     private var dividerMoveObserver: NSObjectProtocol?
     private let panel = GroupPanel()
     private let updater = Updater()
@@ -46,14 +44,9 @@ final class DividerController: NSObject {
     /// How often the fit is checked again while the group is always shown where it fits.
     /// Each check reads only this application's own icons and the front application's menus.
     static let fitCheckInterval: TimeInterval = 1
-    static let restartTimesKey = "RestartTimes"
-    /// More restarts than this within `restartWindow` mean that restarting does not help.
-    static let restartLimit = 3
-    static let restartWindow: TimeInterval = 60
-    private var isRestarting = false
 
     /// Whether the person chose, in the context menu, to show the group whenever it fits
-    /// on the display whose menu bar is active. Kept across restarts.
+    /// on the display whose menu bar is active. Kept across launches.
     private var alwaysShowsGroupWhereItFits: Bool {
         get { defaults.bool(forKey: Self.alwaysShowsGroupWhereItFitsKey) }
         set { defaults.set(newValue, forKey: Self.alwaysShowsGroupWhereItFitsKey) }
@@ -64,14 +57,9 @@ final class DividerController: NSObject {
     /// menu bar while no menu is open.
     private var peekTask: Task<Void, Never>?
     private var isPeeking: Bool { peekTask != nil }
-    static let showsArrangementHelpKey = "ShowsArrangementHelp"
-    /// Whether the arrangement help is open, or is to open once the spacer is placed: on
-    /// the first launch with the Accessibility permission, and again after a restart that
-    /// dragging an icon caused while it was open. Kept across restarts.
-    private var showsArrangementHelp: Bool {
-        get { defaults.bool(forKey: Self.showsArrangementHelpKey) }
-        set { defaults.set(newValue, forKey: Self.showsArrangementHelpKey) }
-    }
+    /// Whether the arrangement help opens once the spacer is first placed: on the first
+    /// launch with the Accessibility permission.
+    private var opensArrangementHelpWhenPlaced = false
     /// The processes that own the group's icons, as last listed in the panel.
     private var listedGroupProcesses: Set<Int32> = []
     /// Whether the group fit when last checked.
@@ -93,7 +81,7 @@ final class DividerController: NSObject {
     /// Why the chosen shortcut could not be registered, when it could not.
     private var hotKeyFailure: HotKey.RegistrationError?
 
-    /// The shortcut that opens the panel from any application, or none. Kept across restarts.
+    /// The shortcut that opens the panel from any application, or none. Kept across launches.
     private var panelShortcut: PanelShortcut? {
         get { PanelShortcut.resolved(storedValue: defaults.string(forKey: Self.panelShortcutKey)) }
         set { defaults.set(PanelShortcut.storedValue(for: newValue), forKey: Self.panelShortcutKey) }
@@ -106,7 +94,6 @@ final class DividerController: NSObject {
             guard let self else { return }
             self.startPeek(groupProcesses: self.listedGroupProcesses)
         }
-        panel.onDone = { [weak self] in self?.showsArrangementHelp = false }
         updater.onWaitingUpdateChange = { [weak self] in self?.updateChevron() }
         if alwaysShowsGroupWhereItFits { watchFit() }
     }
@@ -121,7 +108,6 @@ final class DividerController: NSObject {
     // MARK: Divider and spacer
 
     private func installDivider() {
-        removeItems()
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.autosaveName = Self.dividerAutosaveName
         dividerItem = item
@@ -143,60 +129,89 @@ final class DividerController: NSObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.dividerMoved() }
         }
-        placeSpacer(after: Self.placementDelay)
-    }
-
-    private func removeItems() {
-        spacerPlacementTask?.cancel()
-        if let dividerMoveObserver { NotificationCenter.default.removeObserver(dividerMoveObserver) }
-        dividerMoveObserver = nil
-        for item in [dividerItem, spacerItem].compactMap({ $0 }) {
-            NSStatusBar.system.removeStatusItem(item)
-        }
-        dividerItem = nil
-        spacerItem = nil
-        isSpacerPlaced = false
-    }
-
-    /// Removes the spacer, if any, and adds it again immediately left of the divider. The
-    /// spacer is added narrow and widened only once placed, because the system places a
-    /// status item that is already wide at the far left.
-    private func placeSpacer(after delay: Duration) {
-        spacerPlacementTask?.cancel()
-        isSpacerPlaced = false
-        spacerPlacementTask = Task {
-            try? await Task.sleep(for: delay)
-            guard !Task.isCancelled, let dividerPosition = dividerPreferredPosition() else { return }
-            if let spacerItem { NSStatusBar.system.removeStatusItem(spacerItem) }
-            spacerItem = nil
-            defaults.removeObject(forKey: Self.preferredPositionKey(spacerAutosaveName))
-            defaults.removeObject(forKey: Self.visibilityKey(spacerAutosaveName))
-            defaults.set(defaults.integer(forKey: Self.spacerGenerationKey) + 1, forKey: Self.spacerGenerationKey)
-            defaults.set(
-                Double(Divider.spacerPreferredPosition(dividerPreferredPosition: dividerPosition)),
-                forKey: Self.preferredPositionKey(spacerAutosaveName)
-            )
-            let spacer = NSStatusBar.system.statusItem(withLength: Divider.spacerShowingLength)
-            spacer.autosaveName = spacerAutosaveName
-            spacer.button?.setAccessibilityElement(false)
-            spacerItem = spacer
+        // The divider is given time to reach its own position before the spacer is
+        // placed beside it.
+        spacerStartTask = Task {
             try? await Task.sleep(for: Self.placementDelay)
             guard !Task.isCancelled else { return }
-            isSpacerPlaced = true
-            Self.log.info("spacer placed at preferred position \(self.defaults.double(forKey: Self.preferredPositionKey(self.spacerAutosaveName)))")
-            applyLength()
+            spacerStartTask = nil
+            startSpacer()
+        }
+    }
+
+    /// Starts a helper that adds the spacer immediately left of the divider, narrow; it
+    /// widens once placed, because the system places a status item that is already wide
+    /// at the far left.
+    private func startSpacer() {
+        guard let dividerPosition = dividerPreferredPosition() else {
+            Self.log.error("the divider has no position yet; the spacer is not started")
+            return
+        }
+        let position = Divider.spacerPreferredPosition(dividerPreferredPosition: dividerPosition)
+        do {
+            spacer = try SpacerProcess(
+                preferredPosition: position,
+                onPlaced: { [weak self] in self?.spacerPlaced() },
+                onUnexpectedExit: { [weak self] status in
+                    self?.restartSpacer(reason: "the spacer ended with status \(status)")
+                }
+            )
+            Self.log.info("spacer started at preferred position \(position)")
+        } catch {
+            Self.log.error("\(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func spacerPlaced() {
+        guard isSpacerBesideDivider else {
+            restartSpacer(reason: "divider dragged while the spacer was being placed")
+            return
+        }
+        isSpacerPlaced = true
+        Self.log.info("spacer placed")
+        applyLength()
+        Task {
             await checkFit(measuringGroup: true)
-            if showsArrangementHelp { await openArrangementHelp() }
+            if opensArrangementHelpWhenPlaced {
+                opensArrangementHelpWhenPlaced = false
+                await openArrangementHelp()
+            }
+        }
+    }
+
+    /// Ends the spacer's helper and starts another, unless restarts have stopped helping;
+    /// then the group stays shown, so that nothing is lost from view.
+    ///
+    /// A status item added again within a process that has seen a drag is not reliably
+    /// placed at its preferred position, while one added by a new process is; so moving
+    /// the spacer takes a new helper.
+    private func restartSpacer(reason: String) {
+        guard spacerStartTask == nil else { return }
+        let ending = spacer
+        spacer = nil
+        isSpacerPlaced = false
+        applyLength()
+        let now = ProcessInfo.processInfo.systemUptime
+        spacerRestartTimes = spacerRestartTimes.filter { now - $0 < Self.spacerRestartWindow }
+        guard spacerRestartTimes.count < Self.spacerRestartLimit else {
+            Self.log.error("not restarting the spacer after \(reason, privacy: .public): too many restarts; showing the group")
+            Task { await ending?.end() }
+            return
+        }
+        spacerRestartTimes.append(now)
+        Self.log.info("restarting the spacer: \(reason, privacy: .public)")
+        spacerStartTask = Task {
+            // The next helper reads and writes the same defaults, so the last must end first.
+            await ending?.end()
+            spacerStartTask = nil
+            startSpacer()
         }
     }
 
     /// The divider's preferred position as the system last recorded it, else the distance
     /// from its right edge to the right edge of its display.
     private func dividerPreferredPosition() -> CGFloat? {
-        let key = Self.preferredPositionKey(Self.dividerAutosaveName)
-        if defaults.object(forKey: key) != nil {
-            return CGFloat(defaults.double(forKey: key))
-        }
+        if let recorded = recordedDividerPreferredPosition { return recorded }
         guard
             let frame = dividerItem?.button?.window?.frame,
             let screen = NSScreen.screens.first(where: { $0.frame.contains(NSPoint(x: frame.midX, y: frame.midY)) })
@@ -204,26 +219,31 @@ final class DividerController: NSObject {
         return screen.frame.maxX - frame.maxX
     }
 
-    /// Whether the spacer's recorded position still places it beside the divider's.
+    private var recordedDividerPreferredPosition: CGFloat? {
+        let key = Self.preferredPositionKey(Self.dividerAutosaveName)
+        guard defaults.object(forKey: key) != nil else { return nil }
+        return CGFloat(defaults.double(forKey: key))
+    }
+
+    /// Whether the spacer was started at the position beside the divider's recorded one.
+    /// With no position recorded, the divider has not been dragged since the spacer started.
     private var isSpacerBesideDivider: Bool {
-        let spacerKey = Self.preferredPositionKey(spacerAutosaveName)
-        let dividerKey = Self.preferredPositionKey(Self.dividerAutosaveName)
-        guard defaults.object(forKey: spacerKey) != nil, defaults.object(forKey: dividerKey) != nil else {
-            return false
-        }
+        guard let spacer, let dividerPosition = recordedDividerPreferredPosition else { return true }
         return Divider.isSpacerBesideDivider(
-            spacerPreferredPosition: CGFloat(defaults.double(forKey: spacerKey)),
-            dividerPreferredPosition: CGFloat(defaults.double(forKey: dividerKey))
+            spacerPreferredPosition: spacer.preferredPosition,
+            dividerPreferredPosition: dividerPosition
         )
     }
 
-    /// The defaults changed. If the person dragged the divider with ⌘, the spacer must
-    /// follow it. A status item
-    /// added again within a process that has seen a drag is not reliably placed at its
-    /// preferred position, while one added by a new process is; so icecap restarts.
+    /// The defaults changed. If the person dragged the divider with ⌘, or the spacer was
+    /// given up on, the spacer is placed again beside the divider.
     private func dividerMoved() {
-        guard isSpacerPlaced, !isSpacerBesideDivider else { return }
-        restart(reason: "divider dragged")
+        guard spacerStartTask == nil else { return }
+        if spacer == nil {
+            restartSpacer(reason: "trying the spacer again")
+        } else if isSpacerPlaced, !isSpacerBesideDivider {
+            restartSpacer(reason: "divider dragged")
+        }
     }
 
     /// Whether the divider lies on some display. A misplaced spacer can push the divider
@@ -231,34 +251,6 @@ final class DividerController: NSObject {
     private var isDividerOnScreen: Bool {
         guard let frame = dividerItem?.button?.window?.frame else { return false }
         return NSScreen.screens.contains { $0.frame.intersects(frame) }
-    }
-
-    /// Starts a new instance of icecap and ends this one, unless restarts have stopped
-    /// helping; then the group stays shown, so that nothing is lost from view.
-    private func restart(reason: String) {
-        // Recording the restart changes the defaults, which calls back into `dividerMoved`.
-        guard !isRestarting else { return }
-        isRestarting = true
-        let now = Date().timeIntervalSince1970
-        let recent = (defaults.array(forKey: Self.restartTimesKey) as? [Double] ?? [])
-            .filter { now - $0 < Self.restartWindow }
-        guard recent.count < Self.restartLimit else {
-            Self.log.error("not restarting after \(reason, privacy: .public): too many restarts; showing the group")
-            spacerItem?.length = Divider.spacerShowingLength
-            isSpacerPlaced = false
-            isRestarting = false
-            return
-        }
-        defaults.set(recent + [now], forKey: Self.restartTimesKey)
-        Self.log.info("restarting: \(reason, privacy: .public)")
-        spacerItem?.length = Divider.spacerShowingLength
-        do {
-            try Relaunch.scheduleOpen(bundlePath: Bundle.main.bundlePath)
-            NSApp.terminate(nil)
-        } catch {
-            Self.log.error("could not restart: \(error.localizedDescription, privacy: .public)")
-            isRestarting = false
-        }
     }
 
     /// Whether the group is shown because the person asked for it: for a peek, or always
@@ -269,13 +261,13 @@ final class DividerController: NSObject {
 
     private func applyLength() {
         updateChevron()
-        guard let spacerItem, isSpacerPlaced else { return }
-        spacerItem.length = isShowing ? Divider.spacerShowingLength : Divider.spacerHidingLength
+        guard let spacer, isSpacerPlaced else { return }
+        spacer.send(isShowing ? .show : .hide)
         guard !isShowing else { return }
         Task {
             try? await Task.sleep(for: .milliseconds(600))
-            guard self.spacerItem === spacerItem, !self.isShowing, !self.isDividerOnScreen else { return }
-            self.restart(reason: "the spacer pushed the divider off every display")
+            guard self.spacer === spacer, !self.isShowing, !self.isDividerOnScreen else { return }
+            self.restartSpacer(reason: "the spacer pushed the divider off every display")
         }
     }
 
@@ -526,7 +518,8 @@ final class DividerController: NSObject {
             .filter({ $0.item.processIdentifier == ownIdentifier && $0.item.isLaidOut })
             .max(by: { $0.item.frame.maxX < $1.item.frame.maxX })?.item.frame
         else { return nil }
-        let group = Divider.groupItems(items.map(\.item), dividerFrame: dividerFrame, excludingProcess: ownIdentifier)
+        let excluded = Set([ownIdentifier, spacer?.processIdentifier].compactMap { $0 })
+        let group = Divider.groupItems(items.map(\.item), dividerFrame: dividerFrame, excludingProcesses: excluded)
         return (group, dividerFrame)
     }
 
@@ -585,7 +578,6 @@ final class DividerController: NSObject {
     /// while the help is open, because the panel counts as the pointer's presence in a
     /// peek; see `startPeek`.
     private func openArrangementHelp() async {
-        showsArrangementHelp = true
         guard AccessibilityClient.isTrusted else {
             panel.show(state: .needsAccessibility, at: dividerAnchor())
             return
@@ -596,10 +588,8 @@ final class DividerController: NSObject {
         startPeek(groupProcesses: processes)
     }
 
-    /// Closes the panel, and with it the arrangement help if that is what it shows.
     private func closePanel() {
         panel.close()
-        showsArrangementHelp = false
     }
 
     @objc private func arrangeIcons() {
@@ -811,11 +801,11 @@ final class DividerController: NSObject {
         )
         defaults.set(Double(position), forKey: key)
         defaults.set(true, forKey: Self.positionSeededKey)
-        showsArrangementHelp = true
+        opensArrangementHelpWhenPlaced = true
     }
 
     /// Until the Accessibility permission is granted, checks for it every two seconds;
-    /// once granted, restarts to place the divider as on a first launch.
+    /// once granted, starts icecap again to place the divider as on a first launch.
     private func watchForTrust() {
         trustTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
             guard AccessibilityClient.isTrusted else { return }
@@ -825,7 +815,13 @@ final class DividerController: NSObject {
                 self.trustTimer = nil
                 guard !self.defaults.bool(forKey: Self.positionSeededKey) else { return }
                 self.defaults.removeObject(forKey: Self.preferredPositionKey(Self.dividerAutosaveName))
-                self.restart(reason: "Accessibility permission granted; placing the divider")
+                Self.log.info("Accessibility permission granted; starting again to place the divider")
+                do {
+                    try Relaunch.scheduleOpen(bundlePath: Bundle.main.bundlePath)
+                    NSApp.terminate(nil)
+                } catch {
+                    Self.log.error("could not start again: \(error.localizedDescription, privacy: .public)")
+                }
             }
         }
     }

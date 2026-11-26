@@ -63,15 +63,25 @@ can be removed with `tccutil reset Accessibility io.github.fluffyrabbot.icecap`.
 | Show the group, then ⌘-drag an icon across the chevron | Moves the icon into or out of the group. |
 | Choose Arrange Icons… | Shows the group beside a note on how to arrange it, until Done is clicked. The note also opens by itself when icecap first places the chevron. |
 | Choose Always Show Where It Fits | Keeps the group shown whenever it fits, and hides it where it does not, until the item is chosen again or the chevron is clicked while the group is shown. |
-| ⌘-drag the chevron | Moves the group's boundary. icecap restarts once to follow it. |
+| ⌘-drag the chevron | Moves the group's boundary. The spacer follows within a second. |
 
 ## How it works
 
-icecap adds two status items. The **divider** is the chevron. The **spacer** is an
+icecap shows two status items. The **divider** is the chevron. The **spacer** is an
 invisible item kept immediately left of it. To hide the group, the spacer widens to
 5,000 points and pushes every icon to its left beyond the display's left edge. To show
 the group, it shrinks to nothing. macOS 26 does not draw a status item that extends past
 the display, which is why the visible chevron needs an item of its own.
+
+The spacer belongs to a helper, `icecap-spacer`, in `Contents/Helpers`. The system orders
+status items by the preferred position each process records for them, the smallest at
+the right, so icecap starts the helper with the divider's position plus 0.5. icecap sends
+`hide` and `show` on the helper's standard input, and the helper answers `placed` once
+its item has settled. When the divider is ⌘-dragged, icecap ends the helper and starts
+another at the new position: macOS does not reliably place a status item added again
+within a process that has seen a drag, but places one from a new process correctly (see
+[docs/OBSERVATIONS.md](docs/OBSERVATIONS.md)). The helper ends when its input closes,
+so it ends with icecap however icecap ends.
 
 On a click, icecap measures the group from the icons' Accessibility frames, which keep
 their widths and spacing while pushed off the display. The group fits if it would end at
@@ -121,11 +131,11 @@ Install Update….
   follows the display whose menu bar is active, and the other displays show the same.
 - Icons in the panel show their application's icon, not their live picture,
   because the system will not capture an icon that has been pushed off the display.
-- macOS does not reliably place a status item added again within a running process, so
-  icecap restarts itself to move the spacer after the chevron is dragged. If it restarts
-  more than three times in a minute, it stops and leaves the group shown. It notices the
-  drag by the change in its recorded positions, and macOS rewrites those for several
-  icons when any icon is dragged, so arranging other icons may also cause one restart.
+- The group shows for about a second while the spacer's helper restarts after the
+  chevron is dragged. If the helper restarts more than three times in a minute, icecap
+  stops and leaves the group shown; dragging the chevron again tries once more. icecap notices the
+  drag by the change in its recorded position, and macOS rewrites that when other icons
+  are dragged, so arranging other icons may also restart the helper once.
 - The Accessibility API reports icon positions for the display whose menu bar is active.
 
 ## Development

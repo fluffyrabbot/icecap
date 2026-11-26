@@ -8,6 +8,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "icecap", targets: ["Icecap"]),
+        .executable(name: "icecap-spacer", targets: ["IcecapSpacer"]),
         .library(name: "IcecapCore", targets: ["IcecapCore"]),
     ],
     dependencies: [
@@ -23,6 +24,10 @@ let package = Package(
             ],
             // Scripts/build-app.sh copies Sparkle.framework into the bundle's Frameworks.
             linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
+        ),
+        .executableTarget(
+            name: "IcecapSpacer",
+            dependencies: ["IcecapCore"]
         ),
         .testTarget(
             name: "IcecapCoreTests",

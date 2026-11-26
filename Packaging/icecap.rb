@@ -21,5 +21,8 @@ cask "icecap" do
 
   uninstall quit: "com.memorysynchub.icecap"
 
-  zap trash: "~/Library/Preferences/com.memorysynchub.icecap.plist"
+  zap trash: [
+    "~/Library/Preferences/com.memorysynchub.icecap.plist",
+    "~/Library/Preferences/com.memorysynchub.icecap.spacer.plist",
+  ]
 end

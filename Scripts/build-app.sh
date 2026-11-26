@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds icecap.app into build/.
+# Builds icecap.app into build/, with the icecap-spacer helper in Contents/Helpers.
 # Usage: Scripts/build-app.sh [debug|release]
 # A release build is universal (arm64 and x86_64); a debug build is for this Mac only.
 # The bundle is signed with APPLE_SIGNING_IDENTITY when set, else with the first
@@ -33,7 +33,9 @@ if [[ "$configuration" == "release" ]]; then
 fi
 
 swift build -c "$configuration" ${architectures[@]+"${architectures[@]}"} --product icecap
-binary="$(swift build -c "$configuration" ${architectures[@]+"${architectures[@]}"} --show-bin-path)/icecap"
+swift build -c "$configuration" ${architectures[@]+"${architectures[@]}"} --product icecap-spacer
+products="$(swift build -c "$configuration" ${architectures[@]+"${architectures[@]}"} --show-bin-path)"
+binary="$products/icecap"
 
 bundle="$repository/build/icecap.app"
 rm -rf "$bundle"
@@ -43,10 +45,19 @@ cp "$binary" "$bundle/Contents/MacOS/icecap"
 ditto "$(dirname "$binary")/Sparkle.framework" "$bundle/Contents/Frameworks/Sparkle.framework"
 cp "$repository/Resources/Info.plist" "$bundle/Contents/Info.plist"
 cp "$repository/Resources/AppIcon.icns" "$bundle/Contents/Resources/AppIcon.icns"
+helper="$bundle/Contents/Helpers/icecap-spacer.app"
+mkdir -p "$helper/Contents/MacOS"
+cp "$products/icecap-spacer" "$helper/Contents/MacOS/icecap-spacer"
+cp "$repository/Resources/SpacerInfo.plist" "$helper/Contents/Info.plist"
 
-# The build number counts the commits, so that each release has a larger one.
+# The build number counts the commits, so that each release has a larger one. The helper
+# carries the same version and build number as icecap.
 build_number="$(git rev-list --count HEAD)"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$bundle/Contents/Info.plist"
+version="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$bundle/Contents/Info.plist")"
+for plist in "$bundle/Contents/Info.plist" "$helper/Contents/Info.plist"; do
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$plist"
+done
 
 signing_options=(--force --options runtime --sign "$identity")
 if [[ "$identity" == "Developer ID Application:"* ]]; then
@@ -59,6 +70,7 @@ codesign "${signing_options[@]}" --preserve-metadata=entitlements "$sparkle/XPCS
 codesign "${signing_options[@]}" "$sparkle/Autoupdate"
 codesign "${signing_options[@]}" "$sparkle/Updater.app"
 codesign "${signing_options[@]}" "$bundle/Contents/Frameworks/Sparkle.framework"
+codesign "${signing_options[@]}" "$helper"
 codesign "${signing_options[@]}" "$bundle"
 codesign --verify --deep --strict --verbose=2 "$bundle"
 echo "$bundle"

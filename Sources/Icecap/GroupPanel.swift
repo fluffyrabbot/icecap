@@ -33,7 +33,6 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
 
     var onChoose: ((Entry) -> Void)?
     var onShowInMenuBar: (() -> Void)?
-    var onDone: (() -> Void)?
 
     private var window: GroupPanelWindow?
     private var monitors: [Any] = []
@@ -155,7 +154,6 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
             Self.openAccessibilitySettings()
         case .done:
             close()
-            onDone?()
         }
     }
 
