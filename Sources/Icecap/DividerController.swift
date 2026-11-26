@@ -487,15 +487,19 @@ final class DividerController: NSObject {
     }
 
     /// The left bound of the status area on the display that holds the divider's frame,
-    /// or nil when no display holds it.
+    /// or nil when no display holds it or the front application's menus cannot be read.
     private func statusAreaMinX(around dividerFrame: CGRect) async -> CGFloat? {
         let center = CGPoint(x: dividerFrame.midX, y: dividerFrame.midY)
         guard let screen = NSScreen.screens.first(where: { CGDisplayBounds($0.displayIdentifier).contains(center) }) else {
             return nil
         }
+        guard let menuTitleFrames = await AccessibilityClient.frontMenuTitleFrames() else {
+            Self.log.error("the front application's menus could not be read; the fit is unknown")
+            return nil
+        }
         return Divider.statusAreaMinX(
             displayFrame: CGDisplayBounds(screen.displayIdentifier),
-            menuTitleFrames: await AccessibilityClient.frontMenuTitleFrames(),
+            menuTitleFrames: menuTitleFrames,
             unobscuredTopRightWidth: screen.auxiliaryTopRightArea?.width
         )
     }
@@ -519,7 +523,13 @@ final class DividerController: NSObject {
     }
 
     private func showPanel(listing items: [AccessibleItem]) {
-        let entries = groupEntries(of: items)
+        guard let (group, _) = group(of: items) else {
+            Self.log.error("the divider could not be read; the group is unknown")
+            listedGroupProcesses = []
+            panel.show(state: .unreadable, at: dividerAnchor())
+            return
+        }
+        let entries = groupEntries(of: group, in: items)
         listedGroupProcesses = Set(entries.map(\.accessible.item.processIdentifier))
         panel.show(state: .entries(entries, isShownInMenuBar: isShownOnRequest), at: dividerAnchor())
     }
@@ -538,9 +548,8 @@ final class DividerController: NSObject {
         return (group, dividerFrame)
     }
 
-    private func groupEntries(of items: [AccessibleItem]) -> [GroupPanel.Entry] {
-        guard let (group, _) = group(of: items) else { return [] }
-        return zip(group, MenuBarItem.listedNames(of: group)).compactMap { member, title in
+    private func groupEntries(of group: [MenuBarItem], in items: [AccessibleItem]) -> [GroupPanel.Entry] {
+        zip(group, MenuBarItem.listedNames(of: group)).compactMap { member, title in
             guard let accessible = items.first(where: { $0.item.isSameItem(as: member) }) else { return nil }
             let icon = NSRunningApplication(processIdentifier: member.processIdentifier)?.icon
             return GroupPanel.Entry(accessible: accessible, title: title, icon: icon)

@@ -15,6 +15,8 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
 
     enum State {
         case needsAccessibility
+        /// icecap could not read its own icons, so the group's members are unknown.
+        case unreadable
         case entries([Entry], isShownInMenuBar: Bool)
         /// How to arrange the icons, shown while the group is shown for arranging.
         case arrangementHelp(shortcutTitle: String?)
@@ -164,6 +166,8 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
         switch state {
         case .needsAccessibility:
             rows = [.openAccessibilitySettings]
+        case .unreadable:
+            rows = []
         case .arrangementHelp:
             rows = [.done]
         case .entries(let entries, let isShownInMenuBar):
@@ -250,6 +254,8 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
         switch state {
         case .needsAccessibility:
             stack.addArrangedSubview(note("icecap needs the Accessibility permission to list and open hidden icons."))
+        case .unreadable:
+            stack.addArrangedSubview(note("icecap could not read the chevron's place in the menu bar, so it cannot tell which icons are hidden. Click the chevron again in a moment."))
         case .arrangementHelp(let shortcutTitle):
             let listing = shortcutTitle.map { ", or press \($0) to list them" } ?? ""
             for text in [

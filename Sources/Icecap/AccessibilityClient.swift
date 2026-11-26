@@ -51,23 +51,27 @@ enum AccessibilityClient {
     }
 
     /// The frames of the front application's menu titles, the Apple menu included, as
-    /// laid out on the display whose menu bar is active.
+    /// laid out on the display whose menu bar is active: none for an application that has
+    /// no menu bar, and nil when the menu bar could not be read, as when its owner does
+    /// not answer in time.
     @MainActor
-    static func frontMenuTitleFrames() async -> [CGRect] {
-        guard let processIdentifier = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return [] }
+    static func frontMenuTitleFrames() async -> [CGRect]? {
+        guard let processIdentifier = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return nil }
         return await Task.detached(priority: .userInitiated) {
             let application = AXUIElementCreateApplication(processIdentifier)
             AXUIElementSetMessagingTimeout(application, requestTimeout)
             var bar: CFTypeRef?
-            guard
-                AXUIElementCopyAttributeValue(application, kAXMenuBarAttribute as CFString, &bar) == .success,
-                let bar, CFGetTypeID(bar) == AXUIElementGetTypeID()
-            else { return [] }
+            switch AXUIElementCopyAttributeValue(application, kAXMenuBarAttribute as CFString, &bar) {
+            case .success: break
+            case .noValue, .attributeUnsupported: return []
+            default: return nil
+            }
+            guard let bar, CFGetTypeID(bar) == AXUIElementGetTypeID() else { return nil }
             var children: CFTypeRef?
             guard
                 AXUIElementCopyAttributeValue(bar as! AXUIElement, kAXChildrenAttribute as CFString, &children) == .success,
                 let elements = children as? [AXUIElement]
-            else { return [] }
+            else { return nil }
             return elements.compactMap(frame(of:))
         }.value
     }
