@@ -761,12 +761,30 @@ final class DividerController: NSObject {
         return item
     }
 
+    /// Registers the chosen shortcut before releasing the current one, and keeps it only
+    /// if it could be registered; otherwise the current one stays and the person is told why.
     @objc private func choosePanelShortcut(_ sender: NSMenuItem) {
         guard let storedValue = sender.representedObject as? String else {
             preconditionFailure("each shortcut item carries its stored value")
         }
-        panelShortcut = PanelShortcut.resolved(storedValue: storedValue)
-        registerPanelShortcut()
+        let choice = PanelShortcut.resolved(storedValue: storedValue)
+        var replacement: HotKey?
+        if let choice {
+            do {
+                replacement = try HotKey(shortcut: choice) { [weak self] in self?.panelShortcutPressed() }
+            } catch let error as HotKey.RegistrationError {
+                Self.log.error("\(error.localizedDescription, privacy: .public)")
+                NSApp.activate()
+                NSAlert(error: error).runModal()
+                return
+            } catch {
+                preconditionFailure("HotKey throws only RegistrationError: \(error)")
+            }
+        }
+        hotKey?.unregister()
+        hotKey = replacement
+        hotKeyFailure = nil
+        panelShortcut = choice
     }
 
     @objc private func listHiddenIcons() {
