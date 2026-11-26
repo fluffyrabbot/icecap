@@ -60,3 +60,24 @@ pictures from `screencapture`.
   top edge a few points below the icon.
 - An open menu's window can be missing from one listing of on-screen windows while the
   menu stays open.
+
+## Status items of separate processes
+
+Observed on 2026-11-26 on macOS 26.7.4 (25G422), on the same Mac, with two copies of one
+probe program under different names, so that each had its own defaults domain. Each
+copy wrote a preferred position for its autosave name, then added one status item with
+a short title; a signal set the item's length to 5,000 points or back to its title.
+
+- The system orders status items of different processes by their preferred positions,
+  each read from its own process's defaults. An item added by a second process at a
+  position 0.5 larger than the first process's item landed immediately left of it, with
+  no icon between.
+- Widened to 5,000 points, the second process's item pushed every icon to its left off
+  the display, while the first process's item stayed in place on it.
+- Ending the second process restored the icons; starting it again placed its item beside
+  the first one again. Three restarts in a row each placed it correctly.
+- After the first process's item was dragged with ⌘ to a new place, past other icons,
+  that process recorded the new position (615, then 517 after dragging it back). A new
+  second process started at that position plus 0.5 landed immediately left of the
+  dragged item both times, and hid exactly the icons to its left once widened. The first
+  process never added its item again.
