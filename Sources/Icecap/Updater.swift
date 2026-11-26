@@ -38,11 +38,13 @@ final class Updater: NSObject, @MainActor SPUStandardUserDriverDelegate {
 
     var supportsGentleScheduledUpdateReminders: Bool { true }
 
+    /// An update found by a scheduled check never opens a window, not even the one Sparkle
+    /// would open for a background application near launch; the chevron's dot marks it.
     func standardUserDriverShouldHandleShowingScheduledUpdate(
         _ update: SUAppcastItem,
         andInImmediateFocus immediateFocus: Bool
     ) -> Bool {
-        immediateFocus
+        false
     }
 
     func standardUserDriverWillHandleShowingUpdate(
