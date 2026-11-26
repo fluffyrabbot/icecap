@@ -43,10 +43,10 @@ move itself to the Applications folder, replacing any older copy there.
 ## Use
 
 On first launch macOS asks for the Accessibility permission, which icecap needs to list
-the hidden icons and open their menus. It needs no Screen Recording permission. Once the
-permission is granted, icecap places its chevron just left of the system's icons, so
-every other application's icon starts in the group, and shows the group beside a note on
-how to ⌘-drag icons out of it.
+the hidden icons and open their menus. It needs no Screen Recording permission. Until the
+permission is granted, nothing is hidden. Once it is granted, icecap places its chevron
+just left of the system's icons, so every other application's icon starts in the group,
+and shows the group beside a note on how to ⌘-drag icons out of it.
 
 The bundle identifier changed from `io.github.fluffyrabbot.icecap` to
 `com.memorysynchub.icecap`. macOS keys the Accessibility permission and the stored

@@ -258,21 +258,25 @@ final class DividerController: NSObject {
     private var isShownOnRequest: Bool { isPeeking || isAlwaysShownWhereItFits }
     private var isAlwaysShownWhereItFits: Bool { alwaysShowsGroupWhereItFits && doesGroupFit }
     private var isShowing: Bool { isShownOnRequest || isShowingForPress }
+    /// Whether the spacer hides the group. Without the Accessibility permission nothing
+    /// hidden could be listed or opened, so the group stays shown until it is granted.
+    private var isHidden: Bool { !isShowing && AccessibilityClient.isTrusted }
 
     private func applyLength() {
         updateChevron()
         guard let spacer, isSpacerPlaced else { return }
-        spacer.send(isShowing ? .show : .hide)
-        guard !isShowing else { return }
+        let isHidden = isHidden
+        spacer.send(isHidden ? .hide : .show)
+        guard isHidden else { return }
         Task {
             try? await Task.sleep(for: .milliseconds(600))
-            guard self.spacer === spacer, !self.isShowing, !self.isDividerOnScreen else { return }
+            guard self.spacer === spacer, self.isHidden, !self.isDividerOnScreen else { return }
             self.restartSpacer(reason: "the spacer pushed the divider off every display")
         }
     }
 
     private func updateChevron() {
-        let name = isShowing ? "chevron.right" : "chevron.left"
+        let name = isHidden ? "chevron.left" : "chevron.right"
         let configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
         guard let chevron = NSImage(systemSymbolName: name, accessibilityDescription: "icecap")?
             .withSymbolConfiguration(configuration)
@@ -813,7 +817,11 @@ final class DividerController: NSObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.trustTimer = nil
-                guard !self.defaults.bool(forKey: Self.positionSeededKey) else { return }
+                guard !self.defaults.bool(forKey: Self.positionSeededKey) else {
+                    Self.log.info("Accessibility permission granted; hiding the group")
+                    self.applyLength()
+                    return
+                }
                 self.defaults.removeObject(forKey: Self.preferredPositionKey(Self.dividerAutosaveName))
                 Self.log.info("Accessibility permission granted; starting again to place the divider")
                 do {
