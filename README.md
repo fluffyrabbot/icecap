@@ -134,8 +134,8 @@ Install Update….
 - Icons in the panel show their application's icon, not their live picture,
   because the system will not capture an icon that has been pushed off the display.
 - The group shows for about a second while the spacer's helper restarts after the
-  chevron is dragged. If three helpers in a row fail at one position, icecap leaves the
-  group shown and says so at the top of the context menu, with Try Hiding Icons Again;
+  chevron is dragged. If helpers fail three times within a minute at one position, icecap
+  leaves the group shown and says so at the top of the context menu, with Try Hiding Icons Again;
   dragging the chevron also tries again. icecap notices a drag by the change in the
   chevron's recorded position, which macOS may also rewrite when other icons are dragged,
   so arranging other icons may restart the helper once.

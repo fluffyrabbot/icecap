@@ -11,13 +11,18 @@ import Foundation
 /// has already been replaced.
 ///
 /// A helper that exits unexpectedly, is not placed in time, or pushes the divider off
-/// every display has failed. After `failureLimit` failures at one position the lifecycle
-/// gives up, leaving the group shown, until the position changes or a retry is asked for.
+/// every display has failed. After `failureLimit` failures at one position within
+/// `failureWindow` the lifecycle gives up, leaving the group shown, until the position
+/// changes or a retry is asked for. A new position starts the count afresh, so dragging
+/// the divider never counts against it.
 public struct SpacerLifecycle: Equatable, Sendable {
     public typealias Generation = Int
 
-    /// How many failures in a row at one position end the attempts to place the spacer.
+    /// How many failures at one position within `failureWindow` end the attempts to place
+    /// the spacer.
     public static let failureLimit = 3
+    /// How long, in seconds, a failure counts towards `failureLimit`.
+    public static let failureWindow: TimeInterval = 60
     /// How long a helper may take to report that it has been placed.
     public static let placementTimeLimit = Duration.seconds(5)
 
@@ -52,8 +57,6 @@ public struct SpacerLifecycle: Equatable, Sendable {
         case placementTimedOut(Generation)
         /// The divider lay off every display after the spacer widened.
         case dividerPushedOff(Generation)
-        /// The divider stayed on a display after the spacer widened.
-        case hidingVerified(Generation)
         /// The person asked to try placing the spacer again.
         case retry
     }
@@ -68,8 +71,9 @@ public struct SpacerLifecycle: Equatable, Sendable {
     public private(set) var phase: Phase = .absent
     /// The preferred position the spacer should have, once known.
     public private(set) var position: CGFloat?
-    /// The failures in a row at the current position.
-    public private(set) var failureCount = 0
+    /// When the failures at the current position that still count happened, as system
+    /// uptimes.
+    private var failureTimes: [TimeInterval] = []
     private var lastGeneration: Generation = 0
 
     public init() {}
@@ -81,13 +85,17 @@ public struct SpacerLifecycle: Equatable, Sendable {
 
     public var isFailed: Bool { phase == .failed }
 
-    /// Advances the lifecycle by one event and returns what must be done to the helpers.
-    public mutating func handle(_ event: Event) -> [Effect] {
+    /// The failures at the current position that counted when last recorded.
+    public var failureCount: Int { failureTimes.count }
+
+    /// Advances the lifecycle by one event, which happened at `time`, a system uptime, and
+    /// returns what must be done to the helpers.
+    public mutating func handle(_ event: Event, at time: TimeInterval) -> [Effect] {
         switch event {
         case .positionChanged(let newPosition):
             if let position, abs(position - newPosition) < 0.01 { return [] }
             position = newPosition
-            failureCount = 0
+            failureTimes = []
             switch phase {
             case .absent, .failed:
                 return start()
@@ -112,8 +120,7 @@ public struct SpacerLifecycle: Equatable, Sendable {
                 phase = .failed
                 return []
             case .starting(generation), .placed(generation):
-                failureCount += 1
-                if failureCount >= Self.failureLimit {
+                if recordFailure(at: time) {
                     phase = .failed
                     return []
                 }
@@ -124,23 +131,19 @@ public struct SpacerLifecycle: Equatable, Sendable {
 
         case .placementTimedOut(let generation):
             guard phase == .starting(generation) else { return [] }
-            return fail(generation)
+            return fail(generation, at: time)
 
         case .dividerPushedOff(let generation):
             guard phase == .placed(generation) else { return [] }
-            return fail(generation)
-
-        case .hidingVerified(let generation):
-            if phase == .placed(generation) { failureCount = 0 }
-            return []
+            return fail(generation, at: time)
 
         case .retry:
             switch phase {
             case .failed:
-                failureCount = 0
+                failureTimes = []
                 return start()
             case .stopping(let generation, .fail):
-                failureCount = 0
+                failureTimes = []
                 phase = .stopping(generation, next: .start)
                 return []
             default:
@@ -162,9 +165,15 @@ public struct SpacerLifecycle: Equatable, Sendable {
 
     /// Counts a failure of the running helper and ends it, to be followed by another
     /// unless failures have reached the limit.
-    private mutating func fail(_ generation: Generation) -> [Effect] {
-        failureCount += 1
-        phase = .stopping(generation, next: failureCount >= Self.failureLimit ? .fail : .start)
+    private mutating func fail(_ generation: Generation, at time: TimeInterval) -> [Effect] {
+        phase = .stopping(generation, next: recordFailure(at: time) ? .fail : .start)
         return [.stop(generation)]
+    }
+
+    /// Records a failure, forgets those that no longer count, and returns whether the
+    /// failures that count have reached the limit.
+    private mutating func recordFailure(at time: TimeInterval) -> Bool {
+        failureTimes = failureTimes.filter { time - $0 < Self.failureWindow } + [time]
+        return failureTimes.count >= Self.failureLimit
     }
 }

@@ -145,7 +145,8 @@ final class DividerController: NSObject {
     /// status item that is already wide at the far left; or a helper ended.
     private func handle(_ event: SpacerLifecycle.Event) {
         let previousPhase = spacerLifecycle.phase
-        var effects = spacerLifecycle.handle(event)
+        let time = ProcessInfo.processInfo.systemUptime
+        var effects = spacerLifecycle.handle(event, at: time)
         while !effects.isEmpty {
             switch effects.removeFirst() {
             case .start(let generation, let position):
@@ -166,7 +167,7 @@ final class DividerController: NSObject {
                     }
                 } catch {
                     Self.log.error("\(error.localizedDescription, privacy: .public)")
-                    effects += spacerLifecycle.handle(.exited(generation))
+                    effects += spacerLifecycle.handle(.exited(generation), at: time)
                 }
             case .stop(let generation):
                 spacerProcesses[generation]?.end()
@@ -235,8 +236,10 @@ final class DividerController: NSObject {
         guard isHidden else { return }
         Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(600))
-            guard let self, self.spacerLifecycle.placedGeneration == generation, self.visibility.isHidden else { return }
-            self.handle(self.isDividerOnScreen ? .hidingVerified(generation) : .dividerPushedOff(generation))
+            guard let self, self.spacerLifecycle.placedGeneration == generation, self.visibility.isHidden,
+                  !self.isDividerOnScreen
+            else { return }
+            self.handle(.dividerPushedOff(generation))
         }
     }
 
