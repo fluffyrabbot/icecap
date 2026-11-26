@@ -11,7 +11,8 @@
 # Mac, use Scripts/build-image.sh.
 #
 # --publish then tags the commit v<version> and creates the GitHub release with the disk
-# image and appcast.xml. Installed copies read the feed from the latest release, at the
+# image and appcast.xml, and commits the cask to fluffyrabbot/homebrew-tap as
+# Casks/icecap.rb. Installed copies read the feed from the latest release, at the
 # SUFeedURL in Resources/Info.plist. It requires a clean working tree and a commit
 # already pushed.
 set -euo pipefail
@@ -96,7 +97,7 @@ if $publish; then
   git tag "$tag"
   git push origin "$tag"
   gh release create "$tag" "$image" build/appcast.xml --title "icecap $version" --generate-notes
-  echo "Copy build/icecap.rb to Casks/icecap.rb in fluffyrabbot/homebrew-tap and push it."
+  Scripts/publish-cask.sh "$version"
 fi
 
 echo "$image"

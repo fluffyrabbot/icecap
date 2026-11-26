@@ -12,7 +12,17 @@ It requires macOS 26, and was built and verified on macOS 26.7.2.
 
 ## Install
 
-Download the disk image from the latest
+Install it with Homebrew, which loads casks from a tap outside its own only once they are
+trusted:
+
+```bash
+brew trust --cask fluffyrabbot/tap/icecap
+```
+```bash
+brew install --cask fluffyrabbot/tap/icecap
+```
+
+Or download the disk image from the latest
 [release](https://github.com/fluffyrabbot/icecap/releases/latest), or build it from source
 with Swift 6.2 (Xcode or the Command Line Tools) and copy it to the Applications folder:
 
@@ -175,9 +185,10 @@ Scripts/release.sh --publish
 ```
 
 also tags the commit `v<version>` and creates the GitHub release with the disk image and
-`appcast.xml`, which installed copies read from the latest release. Raise
+`appcast.xml`, which installed copies read from the latest release. It then runs
+`Scripts/publish-cask.sh`, which commits `build/icecap.rb` to
+[fluffyrabbot/homebrew-tap](https://github.com/fluffyrabbot/homebrew-tap) as
+`Casks/icecap.rb` through the GitHub API. Raise
 `CFBundleShortVersionString` before each release; Sparkle compares the build numbers.
-Copy `build/icecap.rb` to `Casks/icecap.rb` in `fluffyrabbot/homebrew-tap` to publish
-the cask.
 
 The icon is drawn by `swift Scripts/draw-icon.swift`, which writes `Resources/AppIcon.icns`.
