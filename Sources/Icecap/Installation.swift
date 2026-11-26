@@ -54,8 +54,18 @@ enum Installation {
         }
     }
 
+    /// An older copy in the way did not quit when asked.
+    struct OlderCopyStillRunning: LocalizedError {
+        let bundleURL: URL
+
+        var errorDescription: String? {
+            "The copy of icecap at \(bundleURL.path) did not quit, so it was not replaced. Quit it and try again."
+        }
+    }
+
     /// Copies the bundle into the first Applications folder that accepts it, replacing an
-    /// older copy there, and returns the copy's location.
+    /// older copy there, and returns the copy's location. The bundle is copied beside the
+    /// destination first, so an older copy is replaced only by a complete one.
     private static func install(_ bundleURL: URL) throws -> URL {
         let fileManager = FileManager.default
         let folders = [
@@ -67,14 +77,26 @@ enum Installation {
             let destination = folder.appendingPathComponent(bundleURL.lastPathComponent)
             do {
                 try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+                let staging = try fileManager.url(
+                    for: .itemReplacementDirectory,
+                    in: .userDomainMask,
+                    appropriateFor: destination,
+                    create: true
+                )
+                defer { try? fileManager.removeItem(at: staging) }
+                let staged = staging.appendingPathComponent(bundleURL.lastPathComponent)
+                try fileManager.copyItem(at: bundleURL, to: staged)
+                removeQuarantine(from: staged)
                 if fileManager.fileExists(atPath: destination.path) {
-                    terminateCopies(at: destination)
-                    try fileManager.trashItem(at: destination, resultingItemURL: nil)
+                    try terminateCopies(at: destination)
+                    _ = try fileManager.replaceItemAt(destination, withItemAt: staged)
+                } else {
+                    try fileManager.moveItem(at: staged, to: destination)
                 }
-                try fileManager.copyItem(at: bundleURL, to: destination)
-                removeQuarantine(from: destination)
                 log.info("moved to \(destination.path, privacy: .public)")
                 return destination
+            } catch let error as OlderCopyStillRunning {
+                throw error
             } catch {
                 log.error("could not install in \(folder.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 lastError = error
@@ -84,7 +106,7 @@ enum Installation {
     }
 
     /// Asks any running icecap launched from `bundleURL` to quit, and waits a while for it.
-    private static func terminateCopies(at bundleURL: URL) {
+    private static func terminateCopies(at bundleURL: URL) throws {
         guard let identifier = Bundle.main.bundleIdentifier else { return }
         let ownIdentifier = ProcessInfo.processInfo.processIdentifier
         let copies = NSRunningApplication.runningApplications(withBundleIdentifier: identifier).filter {
@@ -96,6 +118,7 @@ enum Installation {
         while copies.contains(where: { !$0.isTerminated }), Date() < deadline {
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         }
+        guard copies.allSatisfy(\.isTerminated) else { throw OlderCopyStillRunning(bundleURL: bundleURL) }
     }
 
     /// Removes the quarantine attribute from the copy. This copy already passed Gatekeeper
