@@ -76,6 +76,9 @@ final class DividerController: NSObject {
     private var isShowingForPress = false
     private var pressTask: Task<Void, Never>?
     private var trustTimer: Timer?
+    /// The listing of the group's icons under way for the panel, which a second request
+    /// to toggle the panel cancels.
+    private var panelOpenTask: Task<Void, Never>?
     static let panelShortcutKey = "PanelShortcut"
     private var hotKey: HotKey?
     /// Why the chosen shortcut could not be registered, when it could not.
@@ -366,10 +369,10 @@ final class DividerController: NSObject {
         let event = NSApp.currentEvent
         if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
             showContextMenu()
-        } else if panel.isVisible {
+        } else if panel.isVisible || panelOpenTask != nil {
             closePanel()
         } else if event?.modifierFlags.contains(.option) == true {
-            Task { await openPanel() }
+            openPanel()
         } else if isPeeking {
             endPeek()
         } else if isAlwaysShownWhereItFits {
@@ -499,12 +502,20 @@ final class DividerController: NSObject {
 
     // MARK: Group panel
 
-    private func openPanel() async {
+    /// Opens the panel once the group's icons are listed, unless the panel is toggled
+    /// again meanwhile.
+    private func openPanel() {
+        panelOpenTask?.cancel()
         guard AccessibilityClient.isTrusted else {
             panel.show(state: .needsAccessibility, at: dividerAnchor())
             return
         }
-        showPanel(listing: await AccessibilityClient.items())
+        panelOpenTask = Task {
+            let items = await AccessibilityClient.items()
+            guard !Task.isCancelled else { return }
+            panelOpenTask = nil
+            showPanel(listing: items)
+        }
     }
 
     private func showPanel(listing items: [AccessibleItem]) {
@@ -567,12 +578,13 @@ final class DividerController: NSObject {
         }
     }
 
-    /// Opens the panel, whether or not the group fits, or closes it if it is open.
+    /// Opens the panel, whether or not the group fits, or closes it if it is open or
+    /// opening.
     private func panelShortcutPressed() {
-        if panel.isVisible {
+        if panel.isVisible || panelOpenTask != nil {
             closePanel()
         } else {
-            Task { await openPanel() }
+            openPanel()
         }
     }
 
@@ -593,6 +605,8 @@ final class DividerController: NSObject {
     }
 
     private func closePanel() {
+        panelOpenTask?.cancel()
+        panelOpenTask = nil
         panel.close()
     }
 
@@ -621,7 +635,10 @@ final class DividerController: NSObject {
                 applyLength()
             }
         }
-        guard let frame = await settledFrame(of: target) else {
+        let frame = await settledFrame(of: target)
+        // A later choice took over while this one waited; it must not press as well.
+        guard !Task.isCancelled else { return }
+        guard let frame else {
             NSSound.beep()
             return
         }
@@ -644,11 +661,12 @@ final class DividerController: NSObject {
         }
     }
 
-    /// Waits until the icon lies on a display and has stopped moving, and returns its frame.
+    /// Waits until the icon lies on a display and has stopped moving, and returns its
+    /// frame; nil if it does not settle or the wait is cancelled.
     private func settledFrame(of target: AccessibleItem) async -> CGRect? {
         var previous: CGRect?
         for _ in 0..<40 {
-            try? await Task.sleep(for: .milliseconds(50))
+            do { try await Task.sleep(for: .milliseconds(50)) } catch { return nil }
             guard let frame = AccessibilityClient.frame(of: target.element) else { continue }
             if frame == previous, MenuDetection.isWithinDisplay(frame, displays: WindowServer.displayBounds()) {
                 return frame
@@ -743,7 +761,7 @@ final class DividerController: NSObject {
     }
 
     @objc private func listHiddenIcons() {
-        Task { await openPanel() }
+        openPanel()
     }
 
     @objc private func toggleAlwaysShowsGroupWhereItFits() {
