@@ -23,10 +23,14 @@
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
+	<string>26.0</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 fluffyrabbot. MIT License.</string>
+	<key>SUFeedURL</key>
+	<string>https://github.com/fluffyrabbot/icecap/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>g1qgCwcmNzSlptCz1nCEgfN9/mGeg897jVnffyp3E/g=</string>
 </dict>
 </plist>

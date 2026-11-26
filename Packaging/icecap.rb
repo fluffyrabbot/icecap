@@ -14,7 +14,8 @@ cask "icecap" do
     strategy :github_latest
   end
 
-  depends_on macos: ">= :sonoma"
+  auto_updates true
+  depends_on macos: ">= :tahoe"
 
   app "icecap.app"
 

@@ -37,8 +37,10 @@ binary="$(swift build -c "$configuration" ${architectures[@]+"${architectures[@]
 
 bundle="$repository/build/icecap.app"
 rm -rf "$bundle"
-mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
+mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$bundle/Contents/Frameworks"
 cp "$binary" "$bundle/Contents/MacOS/icecap"
+# The executable finds Sparkle through its rpath, @executable_path/../Frameworks.
+ditto "$(dirname "$binary")/Sparkle.framework" "$bundle/Contents/Frameworks/Sparkle.framework"
 cp "$repository/Resources/Info.plist" "$bundle/Contents/Info.plist"
 cp "$repository/Resources/AppIcon.icns" "$bundle/Contents/Resources/AppIcon.icns"
 
@@ -50,6 +52,13 @@ signing_options=(--force --options runtime --sign "$identity")
 if [[ "$identity" == "Developer ID Application:"* ]]; then
   signing_options+=(--timestamp)
 fi
+# Nested code is signed innermost first, the bundle last (fluffyfleet docs/APPLE-SIGNING.md).
+sparkle="$bundle/Contents/Frameworks/Sparkle.framework/Versions/B"
+codesign "${signing_options[@]}" "$sparkle/XPCServices/Installer.xpc"
+codesign "${signing_options[@]}" --preserve-metadata=entitlements "$sparkle/XPCServices/Downloader.xpc"
+codesign "${signing_options[@]}" "$sparkle/Autoupdate"
+codesign "${signing_options[@]}" "$sparkle/Updater.app"
+codesign "${signing_options[@]}" "$bundle/Contents/Frameworks/Sparkle.framework"
 codesign "${signing_options[@]}" "$bundle"
 codesign --verify --deep --strict --verbose=2 "$bundle"
 echo "$bundle"

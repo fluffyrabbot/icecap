@@ -8,13 +8,13 @@ icecap is a clean-room implementation, MIT licensed. It is written from Apple's
 documentation and from the observations in [docs/OBSERVATIONS.md](docs/OBSERVATIONS.md),
 without reference to the source of Ice, Thaw, IceMelt or Bartender.
 
-Built and verified on macOS 26.7.2. It declares macOS 14 as its minimum, but has not
-been tried there.
+It requires macOS 26, and was built and verified on macOS 26.7.2.
 
 ## Install
 
-Build it from source with Swift 6 (Xcode or the Command Line Tools), then copy it to the
-Applications folder:
+Download the disk image from the latest
+[release](https://github.com/fluffyrabbot/icecap/releases/latest), or build it from source
+with Swift 6.2 (Xcode or the Command Line Tools) and copy it to the Applications folder:
 
 ```bash
 Scripts/build-app.sh
@@ -49,7 +49,7 @@ can be removed with `tccutil reset Accessibility io.github.fluffyrabbot.icecap`.
 | Click the chevron | Shows the group in the menu bar if it fits beside the front application's menus and any camera housing, and hides it again once the pointer has been out of the menu bar for a second with no menu open. Otherwise lists the hidden icons: pick one to show the group, open that icon's menu, and hide the group again once the menu closes. Click again to hide the group at once. |
 | ⌥-click the chevron, or press ⌃⌥⌘Space in any application | Lists the hidden icons, whether or not the group fits. Press the shortcut again to close the list. |
 | Type in the list | Narrows it to the icons whose names match. ↑ and ↓ move the selection, Return opens the selected icon's menu, Escape clears the filter and then closes the list. |
-| Right-click the chevron | Always show the group where it fits, list hidden icons, arrange icons, choose the keyboard shortcut (⌃⌥⌘Space, ⌃⌥⌘H, ⌃⌥⌘M or none), open at login, Accessibility settings, quit. |
+| Right-click the chevron | Always show the group where it fits, list hidden icons, arrange icons, choose the keyboard shortcut (⌃⌥⌘Space, ⌃⌥⌘H, ⌃⌥⌘M or none), open at login, Accessibility settings, about icecap, check for updates, quit. |
 | Show the group, then ⌘-drag an icon across the chevron | Moves the icon into or out of the group. |
 | Choose Arrange Icons… | Shows the group beside a note on how to arrange it, until Done is clicked. The note also opens by itself when icecap first places the chevron. |
 | Choose Always Show Where It Fits | Keeps the group shown whenever it fits, and hides it where it does not, until the item is chosen again or the chevron is clicked while the group is shown. |
@@ -95,6 +95,16 @@ The pure logic (grouping, placement, menu detection, the reveal and peek session
 panel's filter) is in
 `Sources/IcecapCore` and is unit tested. The AppKit application is in `Sources/Icecap`.
 
+## Updates
+
+icecap updates itself with [Sparkle](https://sparkle-project.org). On its second launch
+Sparkle asks whether to check for updates automatically; Check for Updates… in the
+context menu checks at once. The feed is `appcast.xml` in the latest GitHub release,
+and every update is signed with the EdDSA key whose public half is `SUPublicEDKey` in
+`Resources/Info.plist`. icecap has no Dock icon, so an update found by an automatic check
+does not open a window: a dot appears beside the chevron, and the context menu offers
+Install Update….
+
 ## Limitations
 
 - One group, shown or hidden on every display at once. Always shown where it fits, it
@@ -120,7 +130,9 @@ Scripts/build-app.sh debug
 `Scripts/build-app.sh` signs with `APPLE_SIGNING_IDENTITY` when set, otherwise with the
 first "Apple Development" identity in the keychain; with neither it stops. It never signs
 ad hoc: a stable identity keeps the Accessibility permission across rebuilds, and an ad
-hoc signature would lose it on every build.
+hoc signature would lose it on every build. It copies `Sparkle.framework`, which Swift
+Package Manager fetches, into the bundle's `Frameworks` and signs Sparkle's nested code
+before the bundle.
 
 icecap writes its log under the subsystem `com.memorysynchub.icecap`:
 
@@ -137,8 +149,9 @@ only. The version is `CFBundleShortVersionString` in `Resources/Info.plist`; the
 number is the commit count.
 
 `Scripts/release.sh` makes the disk image for other Macs. It stops before building unless
-`APPLE_SIGNING_IDENTITY` names a "Developer ID Application" identity and
-`APPLE_NOTARY_PROFILE` names a stored notarytool profile:
+`APPLE_SIGNING_IDENTITY` names a "Developer ID Application" identity,
+`APPLE_NOTARY_PROFILE` names a stored notarytool profile, and the Sparkle private key in
+the login keychain, where Sparkle's `generate_keys` stores it, matches `SUPublicEDKey`:
 
 ```bash
 export APPLE_TEAM_ID=<team-id>
@@ -153,14 +166,17 @@ xcrun notarytool store-credentials memorysynchub --key <path to AuthKey_<key-id>
 ```
 
 The script builds and signs the bundle and the disk image, notarizes and staples the
-image, checks both with `spctl`, and writes the Homebrew cask `build/icecap.rb` from
+image, checks both with `spctl`, signs the stapled image for Sparkle with `sign_update`,
+writes the feed `build/appcast.xml`, and writes the Homebrew cask `build/icecap.rb` from
 `Packaging/icecap.rb`. From a clean, pushed `main`,
 
 ```bash
 Scripts/release.sh --publish
 ```
 
-also tags the commit `v<version>` and creates the GitHub release with the disk image.
+also tags the commit `v<version>` and creates the GitHub release with the disk image and
+`appcast.xml`, which installed copies read from the latest release. Raise
+`CFBundleShortVersionString` before each release; Sparkle compares the build numbers.
 Copy `build/icecap.rb` to `Casks/icecap.rb` in `fluffyrabbot/homebrew-tap` to publish
 the cask.
 

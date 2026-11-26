@@ -41,6 +41,7 @@ final class DividerController: NSObject {
     private var spacerPlacementTask: Task<Void, Never>?
     private var dividerMoveObserver: NSObjectProtocol?
     private let panel = GroupPanel()
+    private let updater = Updater()
     static let alwaysShowsGroupWhereItFitsKey = "AlwaysShowsGroupWhereItFits"
     /// How often the fit is checked again while the group is always shown where it fits.
     /// Each check reads only this application's own icons and the front application's menus.
@@ -106,6 +107,7 @@ final class DividerController: NSObject {
             self.startPeek(groupProcesses: self.listedGroupProcesses)
         }
         panel.onDone = { [weak self] in self?.showsArrangementHelp = false }
+        updater.onWaitingUpdateChange = { [weak self] in self?.updateChevron() }
         if alwaysShowsGroupWhereItFits { watchFit() }
     }
 
@@ -280,10 +282,30 @@ final class DividerController: NSObject {
     private func updateChevron() {
         let name = isShowing ? "chevron.right" : "chevron.left"
         let configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: "icecap")?
+        guard let chevron = NSImage(systemSymbolName: name, accessibilityDescription: "icecap")?
             .withSymbolConfiguration(configuration)
-        image?.isTemplate = true
+        else { return }
+        let image = updater.isUpdateWaiting ? Self.markedForUpdate(chevron) : chevron
+        image.isTemplate = true
         dividerItem?.button?.image = image
+        dividerItem?.button?.setAccessibilityLabel(updater.isUpdateWaiting ? "icecap, update available" : "icecap")
+    }
+
+    /// The chevron with a dot at its upper right, which marks an update waiting to be shown.
+    private static func markedForUpdate(_ chevron: NSImage) -> NSImage {
+        let dotDiameter: CGFloat = 5
+        let size = NSSize(width: chevron.size.width + dotDiameter, height: chevron.size.height)
+        return NSImage(size: size, flipped: false) { _ in
+            chevron.draw(in: NSRect(origin: .zero, size: chevron.size))
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: NSRect(
+                x: size.width - dotDiameter,
+                y: size.height - dotDiameter,
+                width: dotDiameter,
+                height: dotDiameter
+            )).fill()
+            return true
+        }
     }
 
     private func setAlwaysShowsGroupWhereItFits(_ showing: Bool) {
@@ -676,6 +698,17 @@ final class DividerController: NSObject {
         settingsItem.target = self
         menu.addItem(settingsItem)
         menu.addItem(.separator())
+        let aboutItem = NSMenuItem(title: "About icecap", action: #selector(showAbout), keyEquivalent: "")
+        aboutItem.target = self
+        menu.addItem(aboutItem)
+        let updateItem = NSMenuItem(
+            title: updater.isUpdateWaiting ? "Install Update…" : "Check for Updates…",
+            action: updater.canCheckForUpdates ? #selector(checkForUpdates) : nil,
+            keyEquivalent: ""
+        )
+        updateItem.target = self
+        menu.addItem(updateItem)
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit icecap", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         let bounds = button.bounds
         let location = NSPoint(x: bounds.minX, y: button.isFlipped ? bounds.maxY + 6 : bounds.minY - 6)
@@ -721,6 +754,15 @@ final class DividerController: NSObject {
 
     @objc private func toggleAlwaysShowsGroupWhereItFits() {
         setAlwaysShowsGroupWhereItFits(!alwaysShowsGroupWhereItFits)
+    }
+
+    @objc private func showAbout() {
+        NSApp.activate()
+        NSApp.orderFrontStandardAboutPanel(nil)
+    }
+
+    @objc private func checkForUpdates() {
+        updater.checkForUpdates()
     }
 
     @objc private func toggleOpenAtLogin() {
