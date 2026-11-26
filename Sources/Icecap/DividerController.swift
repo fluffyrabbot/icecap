@@ -24,46 +24,33 @@ final class DividerController: NSObject {
 
     private let defaults = UserDefaults.standard
     private var dividerItem: NSStatusItem?
-    /// The helper that holds the spacer, once started.
-    private var spacer: SpacerProcess?
-    /// Whether the spacer has been placed beside the divider and may widen.
-    private var isSpacerPlaced = false
-    /// The wait before the first spacer starts, or a restart of the spacer under way.
-    private var spacerStartTask: Task<Void, Never>?
-    /// When the spacer was restarted, as system uptimes, so that restarts that do not help
-    /// can be stopped.
-    private var spacerRestartTimes: [TimeInterval] = []
-    /// More restarts of the spacer than this within `spacerRestartWindow` mean that
-    /// restarting does not help.
-    static let spacerRestartLimit = 3
-    static let spacerRestartWindow: TimeInterval = 60
+    /// Whether the divider has had time to reach its own position; until then the spacer
+    /// does not follow it.
+    private var isDividerSettled = false
     private var dividerMoveObserver: NSObjectProtocol?
+    /// The life of the spacer's helpers; see `SpacerLifecycle`.
+    private var spacerLifecycle = SpacerLifecycle()
+    /// The running helpers by generation: the current one and any still ending.
+    private var spacerProcesses: [SpacerLifecycle.Generation: SpacerProcess] = [:]
     private let panel = GroupPanel()
     private let updater = Updater()
     static let alwaysShowsGroupWhereItFitsKey = "AlwaysShowsGroupWhereItFits"
     /// How often the fit is checked again while the group is always shown where it fits.
     /// Each check reads only this application's own icons and the front application's menus.
     static let fitCheckInterval: TimeInterval = 1
-
-    /// Whether the person chose, in the context menu, to show the group whenever it fits
-    /// on the display whose menu bar is active. Kept across launches.
-    private var alwaysShowsGroupWhereItFits: Bool {
-        get { defaults.bool(forKey: Self.alwaysShowsGroupWhereItFitsKey) }
-        set { defaults.set(newValue, forKey: Self.alwaysShowsGroupWhereItFitsKey) }
-    }
+    /// Whether the group is shown or hidden; see `GroupVisibility`. The choice to show it
+    /// always where it fits is kept in the defaults.
+    private var visibility: GroupVisibility
+    /// The work of the activity under way, if it has any: watching a peek, or pressing an
+    /// icon. Cancelled when the activity ends or another begins.
+    private var activityTask: Task<Void, Never>?
     /// How often a peek checks whether the pointer has left the menu bar.
     static let peekCheckInterval = Duration.milliseconds(200)
-    /// The peek under way, if any: the group shown on request until the pointer leaves the
-    /// menu bar while no menu is open.
-    private var peekTask: Task<Void, Never>?
-    private var isPeeking: Bool { peekTask != nil }
     /// Whether the arrangement help opens once the spacer is first placed: on the first
     /// launch with the Accessibility permission.
     private var opensArrangementHelpWhenPlaced = false
     /// The processes that own the group's icons, as last listed in the panel.
     private var listedGroupProcesses: Set<Int32> = []
-    /// Whether the group fit when last checked.
-    private var doesGroupFit = false
     /// The group's width as last measured while it was hidden; see `Divider.groupFits`.
     private var hiddenGroupWidth: CGFloat = 0
     /// Whether `hiddenGroupWidth` has been measured since launch. Until it has, every fit
@@ -72,9 +59,6 @@ final class DividerController: NSObject {
     private var fitTimer: Timer?
     private var fitObservers: [(NotificationCenter, NSObjectProtocol)] = []
     private var isCheckingFit = false
-    /// Whether the group is shown for the moment, so that one of its icons can be pressed.
-    private var isShowingForPress = false
-    private var pressTask: Task<Void, Never>?
     private var trustTimer: Timer?
     /// The listing of the group's icons under way for the panel, which a second request
     /// to toggle the panel cancels.
@@ -91,14 +75,19 @@ final class DividerController: NSObject {
     }
 
     override init() {
+        visibility = GroupVisibility(
+            alwaysShowsWhereItFits: UserDefaults.standard.bool(forKey: Self.alwaysShowsGroupWhereItFitsKey),
+            isPermitted: AccessibilityClient.isTrusted
+        )
         super.init()
         panel.onChoose = { [weak self] entry in self?.press(entry) }
         panel.onShowInMenuBar = { [weak self] in
             guard let self else { return }
             self.startPeek(groupProcesses: self.listedGroupProcesses)
         }
+        panel.onClose = { [weak self] state in self?.panelClosed(state) }
         updater.onWaitingUpdateChange = { [weak self] in self?.updateChevron() }
-        if alwaysShowsGroupWhereItFits { watchFit() }
+        if visibility.alwaysShowsWhereItFits { watchFit() }
     }
 
     func start() async {
@@ -130,123 +119,99 @@ final class DividerController: NSObject {
             object: defaults,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.dividerMoved() }
+            MainActor.assumeIsolated { self?.followDivider() }
         }
         // The divider is given time to reach its own position before the spacer is
         // placed beside it.
-        spacerStartTask = Task {
+        Task {
             try? await Task.sleep(for: Self.placementDelay)
-            guard !Task.isCancelled else { return }
-            spacerStartTask = nil
-            startSpacer()
+            isDividerSettled = true
+            followDivider()
         }
     }
 
-    /// Starts a helper that adds the spacer immediately left of the divider, narrow; it
-    /// widens once placed, because the system places a status item that is already wide
-    /// at the far left.
-    private func startSpacer() {
+    /// Keeps the spacer immediately left of the divider, wherever the divider now lies.
+    private func followDivider() {
+        guard isDividerSettled else { return }
         guard let dividerPosition = dividerPreferredPosition() else {
             Self.log.error("the divider has no position yet; the spacer is not started")
             return
         }
-        let position = Divider.spacerPreferredPosition(dividerPreferredPosition: dividerPosition)
-        do {
-            spacer = try SpacerProcess(
-                preferredPosition: position,
-                onPlaced: { [weak self] in self?.spacerPlaced() },
-                onUnexpectedExit: { [weak self] status in
-                    self?.restartSpacer(reason: "the spacer ended with status \(status)")
+        handle(.positionChanged(Divider.spacerPreferredPosition(dividerPreferredPosition: dividerPosition)))
+    }
+
+    /// Advances the spacer's lifecycle by the event and carries out what it requires: a
+    /// helper started narrow, which widens only once placed, because the system places a
+    /// status item that is already wide at the far left; or a helper ended.
+    private func handle(_ event: SpacerLifecycle.Event) {
+        let previousPhase = spacerLifecycle.phase
+        var effects = spacerLifecycle.handle(event)
+        while !effects.isEmpty {
+            switch effects.removeFirst() {
+            case .start(let generation, let position):
+                do {
+                    spacerProcesses[generation] = try SpacerProcess(
+                        preferredPosition: position,
+                        onReport: { [weak self] report in
+                            switch report {
+                            case .placed: self?.handle(.placed(generation))
+                            }
+                        },
+                        onExit: { [weak self] status in self?.spacerExited(generation, status: status) }
+                    )
+                    Self.log.info("spacer \(generation) started at preferred position \(position)")
+                    Task { [weak self] in
+                        try? await Task.sleep(for: SpacerLifecycle.placementTimeLimit)
+                        self?.handle(.placementTimedOut(generation))
+                    }
+                } catch {
+                    Self.log.error("\(error.localizedDescription, privacy: .public)")
+                    effects += spacerLifecycle.handle(.exited(generation))
                 }
-            )
-            Self.log.info("spacer started at preferred position \(position)")
-        } catch {
-            Self.log.error("\(error.localizedDescription, privacy: .public)")
+            case .stop(let generation):
+                spacerProcesses[generation]?.end()
+            }
         }
+        let phase = spacerLifecycle.phase
+        guard phase != previousPhase else { return }
+        Self.log.info("spacer \(String(describing: event), privacy: .public): \(String(describing: phase), privacy: .public)")
+        if spacerLifecycle.isFailed {
+            Self.log.error("the spacer could not be placed after \(SpacerLifecycle.failureLimit) tries; the group stays shown")
+        }
+        applyVisibility()
+        if case .placed = phase { spacerPlaced() }
+    }
+
+    private func spacerExited(_ generation: SpacerLifecycle.Generation, status: Int32) {
+        spacerProcesses[generation] = nil
+        Self.log.info("spacer \(generation) exited with status \(status)")
+        handle(.exited(generation))
     }
 
     private func spacerPlaced() {
-        guard isSpacerBesideDivider else {
-            restartSpacer(reason: "divider dragged while the spacer was being placed")
-            return
-        }
-        isSpacerPlaced = true
-        Self.log.info("spacer placed")
-        applyLength()
         Task {
             await checkFit(measuringGroup: true)
             if opensArrangementHelpWhenPlaced {
                 opensArrangementHelpWhenPlaced = false
-                await openArrangementHelp()
+                openArrangementHelp()
             }
         }
     }
 
-    /// Ends the spacer's helper and starts another, unless restarts have stopped helping;
-    /// then the group stays shown, so that nothing is lost from view.
-    ///
-    /// A status item added again within a process that has seen a drag is not reliably
-    /// placed at its preferred position, while one added by a new process is; so moving
-    /// the spacer takes a new helper.
-    private func restartSpacer(reason: String) {
-        guard spacerStartTask == nil else { return }
-        let ending = spacer
-        spacer = nil
-        isSpacerPlaced = false
-        applyLength()
-        let now = ProcessInfo.processInfo.systemUptime
-        spacerRestartTimes = spacerRestartTimes.filter { now - $0 < Self.spacerRestartWindow }
-        guard spacerRestartTimes.count < Self.spacerRestartLimit else {
-            Self.log.error("not restarting the spacer after \(reason, privacy: .public): too many restarts; showing the group")
-            Task { await ending?.end() }
-            return
-        }
-        spacerRestartTimes.append(now)
-        Self.log.info("restarting the spacer: \(reason, privacy: .public)")
-        spacerStartTask = Task {
-            // The next helper reads and writes the same defaults, so the last must end first.
-            await ending?.end()
-            spacerStartTask = nil
-            startSpacer()
-        }
+    @objc private func retrySpacer() {
+        handle(.retry)
     }
 
     /// The divider's preferred position as the system last recorded it, else the distance
     /// from its right edge to the right edge of its display.
     private func dividerPreferredPosition() -> CGFloat? {
-        if let recorded = recordedDividerPreferredPosition { return recorded }
+        let key = Self.preferredPositionKey(Self.dividerAutosaveName)
+        if defaults.object(forKey: key) != nil { return CGFloat(defaults.double(forKey: key)) }
         guard
             let frame = dividerItem?.button?.window?.frame,
             let screen = NSScreen.screens.first(where: { $0.frame.contains(NSPoint(x: frame.midX, y: frame.midY)) })
         else { return nil }
         return screen.frame.maxX - frame.maxX
-    }
-
-    private var recordedDividerPreferredPosition: CGFloat? {
-        let key = Self.preferredPositionKey(Self.dividerAutosaveName)
-        guard defaults.object(forKey: key) != nil else { return nil }
-        return CGFloat(defaults.double(forKey: key))
-    }
-
-    /// Whether the spacer was started at the position beside the divider's recorded one.
-    /// With no position recorded, the divider has not been dragged since the spacer started.
-    private var isSpacerBesideDivider: Bool {
-        guard let spacer, let dividerPosition = recordedDividerPreferredPosition else { return true }
-        return Divider.isSpacerBesideDivider(
-            spacerPreferredPosition: spacer.preferredPosition,
-            dividerPreferredPosition: dividerPosition
-        )
-    }
-
-    /// The defaults changed. If the person dragged the divider with ⌘, or the spacer was
-    /// given up on, the spacer is placed again beside the divider.
-    private func dividerMoved() {
-        guard spacerStartTask == nil else { return }
-        if spacer == nil {
-            restartSpacer(reason: "trying the spacer again")
-        } else if isSpacerPlaced, !isSpacerBesideDivider {
-            restartSpacer(reason: "divider dragged")
-        }
     }
 
     /// Whether the divider lies on some display. A misplaced spacer can push the divider
@@ -256,30 +221,27 @@ final class DividerController: NSObject {
         return NSScreen.screens.contains { $0.frame.intersects(frame) }
     }
 
-    /// Whether the group is shown because the person asked for it: for a peek, or always
-    /// where it fits.
-    private var isShownOnRequest: Bool { isPeeking || isAlwaysShownWhereItFits }
-    private var isAlwaysShownWhereItFits: Bool { alwaysShowsGroupWhereItFits && doesGroupFit }
-    private var isShowing: Bool { isShownOnRequest || isShowingForPress }
-    /// Whether the spacer hides the group. Without the Accessibility permission nothing
-    /// hidden could be listed or opened, so the group stays shown until it is granted.
-    private var isHidden: Bool { !isShowing && AccessibilityClient.isTrusted }
+    /// Whether the spacer now hides the group: it is placed, and the group should be hidden.
+    private var isGroupHidden: Bool { visibility.isHidden && spacerLifecycle.placedGeneration != nil }
 
-    private func applyLength() {
+    /// Widens or shrinks the placed spacer as the group should be hidden or shown, and
+    /// checks, once it has widened, that it left the divider on a display.
+    private func applyVisibility() {
+        visibility.isPermitted = AccessibilityClient.isTrusted
         updateChevron()
-        guard let spacer, isSpacerPlaced else { return }
-        let isHidden = isHidden
+        guard let generation = spacerLifecycle.placedGeneration, let spacer = spacerProcesses[generation] else { return }
+        let isHidden = visibility.isHidden
         spacer.send(isHidden ? .hide : .show)
         guard isHidden else { return }
-        Task {
+        Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(600))
-            guard self.spacer === spacer, self.isHidden, !self.isDividerOnScreen else { return }
-            self.restartSpacer(reason: "the spacer pushed the divider off every display")
+            guard let self, self.spacerLifecycle.placedGeneration == generation, self.visibility.isHidden else { return }
+            self.handle(self.isDividerOnScreen ? .hidingVerified(generation) : .dividerPushedOff(generation))
         }
     }
 
     private func updateChevron() {
-        let name = isHidden ? "chevron.left" : "chevron.right"
+        let name = isGroupHidden ? "chevron.left" : "chevron.right"
         let configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
         guard let chevron = NSImage(systemSymbolName: name, accessibilityDescription: "icecap")?
             .withSymbolConfiguration(configuration)
@@ -308,15 +270,43 @@ final class DividerController: NSObject {
     }
 
     private func setAlwaysShowsGroupWhereItFits(_ showing: Bool) {
-        alwaysShowsGroupWhereItFits = showing
+        defaults.set(showing, forKey: Self.alwaysShowsGroupWhereItFitsKey)
+        visibility.alwaysShowsWhereItFits = showing
         if showing {
             watchFit()
             Task { await checkFit(measuringGroup: true) }
         } else {
             stopWatchingFit()
-            doesGroupFit = false
         }
-        applyLength()
+        applyVisibility()
+    }
+
+    // MARK: Activities
+
+    /// Begins the activity, ending the one under way and cancelling its work.
+    private func begin(_ activity: GroupVisibility.Activity) -> GroupVisibility.Ticket {
+        activityTask?.cancel()
+        activityTask = nil
+        let ticket = visibility.begin(activity)
+        Self.log.info("\(String(describing: activity), privacy: .public) began")
+        applyVisibility()
+        return ticket
+    }
+
+    /// Ends the ticket's activity, unless another has superseded it.
+    private func finish(_ ticket: GroupVisibility.Ticket) {
+        guard visibility.end(ticket) else { return }
+        activityTask = nil
+        Self.log.info("\(String(describing: ticket.activity), privacy: .public) ended")
+        applyVisibility()
+    }
+
+    /// Ends whatever activity is under way, at once.
+    private func endActivity() {
+        activityTask?.cancel()
+        activityTask = nil
+        visibility.endActivity()
+        applyVisibility()
     }
 
     // MARK: Peek
@@ -327,12 +317,12 @@ final class DividerController: NSObject {
     /// - Parameter groupProcesses: The processes that own the group's icons, whose
     ///   popovers keep the peek going as menus do.
     private func startPeek(groupProcesses: Set<Int32>) {
-        peekTask?.cancel()
-        peekTask = Task { [weak self] in
+        let ticket = begin(.peeking)
+        activityTask = Task { [weak self] in
             var session = PeekSession(startTime: ProcessInfo.processInfo.systemUptime)
-            while !Task.isCancelled {
-                try? await Task.sleep(for: Self.peekCheckInterval)
-                guard let self, !Task.isCancelled else { return }
+            while true {
+                do { try await Task.sleep(for: Self.peekCheckInterval) } catch { return }
+                guard let self else { return }
                 let isPointerPresent = self.panel.isVisible || Self.isPointerInMenuBar
                 let isMenuOpen = !isPointerPresent && MenuDetection.isAnyMenuOpen(
                     windows: WindowServer.onScreenWindows(),
@@ -341,19 +331,11 @@ final class DividerController: NSObject {
                 )
                 let time = ProcessInfo.processInfo.systemUptime
                 if session.observe(isPointerPresent: isPointerPresent, isMenuOpen: isMenuOpen, time: time) {
-                    Self.log.info("peek ended: the pointer left the menu bar")
-                    self.endPeek()
+                    self.finish(ticket)
                     return
                 }
             }
         }
-        applyLength()
-    }
-
-    private func endPeek() {
-        peekTask?.cancel()
-        peekTask = nil
-        applyLength()
     }
 
     /// Whether the pointer lies in the menu bar of any display.
@@ -370,12 +352,13 @@ final class DividerController: NSObject {
         if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
             showContextMenu()
         } else if panel.isVisible || panelOpenTask != nil {
+            // Closing the arrangement help also ends arranging; see `panelClosed`.
             closePanel()
         } else if event?.modifierFlags.contains(.option) == true {
             openPanel()
-        } else if isPeeking {
-            endPeek()
-        } else if isAlwaysShownWhereItFits {
+        } else if visibility.activity != nil {
+            endActivity()
+        } else if visibility.isShownWhereItFits {
             setAlwaysShowsGroupWhereItFits(false)
         } else {
             Task { await peekOrOpenPanel() }
@@ -394,7 +377,7 @@ final class DividerController: NSObject {
         if let (group, dividerFrame) = group(of: items),
            let statusAreaMinX = await statusAreaMinX(around: dividerFrame) {
             let width = Divider.groupWidth(group)
-            if !isShowing { recordHiddenGroupWidth(of: group) }
+            if !visibility.isShown { recordHiddenGroupWidth(of: group) }
             if Divider.groupFits(width: max(width, hiddenGroupWidth), dividerFrame: dividerFrame, statusAreaMinX: statusAreaMinX) {
                 Self.log.info("group of \(group.count) fits; peeking at it")
                 startPeek(groupProcesses: Set(group.map(\.processIdentifier)))
@@ -453,8 +436,9 @@ final class DividerController: NSObject {
     ///   up to two seconds, to measure the group again; otherwise the last width measured
     ///   while the group was hidden is used.
     private func checkFit(measuringGroup: Bool) async {
-        guard alwaysShowsGroupWhereItFits, isSpacerPlaced, !isShowingForPress, !isCheckingFit,
-              AccessibilityClient.isTrusted else { return }
+        guard visibility.alwaysShowsWhereItFits, spacerLifecycle.placedGeneration != nil,
+              visibility.activity != .pressing, !isCheckingFit, AccessibilityClient.isTrusted
+        else { return }
         isCheckingFit = true
         defer { isCheckingFit = false }
         let ownIdentifier = ProcessInfo.processInfo.processIdentifier
@@ -462,17 +446,17 @@ final class DividerController: NSObject {
         let items = await AccessibilityClient.items(ofProcess: measuringGroup ? nil : ownIdentifier)
         guard let (group, dividerFrame) = group(of: items),
               let statusAreaMinX = await statusAreaMinX(around: dividerFrame),
-              alwaysShowsGroupWhereItFits, !isShowingForPress
+              visibility.alwaysShowsWhereItFits, visibility.activity != .pressing
         else { return }
-        if measuringGroup, !isShowing { recordHiddenGroupWidth(of: group) }
+        if measuringGroup, !visibility.isShown { recordHiddenGroupWidth(of: group) }
         guard isGroupMeasured else { return }
         var width = hiddenGroupWidth
-        if measuringGroup, isShowing { width = max(width, Divider.groupWidth(group)) }
+        if measuringGroup, visibility.isShown { width = max(width, Divider.groupWidth(group)) }
         let fits = Divider.groupFits(width: width, dividerFrame: dividerFrame, statusAreaMinX: statusAreaMinX)
-        guard fits != doesGroupFit else { return }
+        guard fits != visibility.fits else { return }
         Self.log.info("group of width \(width) \(fits ? "fits again; showing it" : "no longer fits; hiding it", privacy: .public)")
-        doesGroupFit = fits
-        applyLength()
+        visibility.fits = fits
+        applyVisibility()
     }
 
     /// Records the width of the hidden group, unless the menu bar is still being laid out
@@ -531,7 +515,7 @@ final class DividerController: NSObject {
         }
         let entries = groupEntries(of: group, in: items)
         listedGroupProcesses = Set(entries.map(\.accessible.item.processIdentifier))
-        panel.show(state: .entries(entries, isShownInMenuBar: isShownOnRequest), at: dividerAnchor())
+        panel.show(state: .entries(entries, isShownInMenuBar: visibility.isShown), at: dividerAnchor())
     }
 
     /// The group's icons, left to right, and the divider's frame, as the Accessibility
@@ -543,7 +527,7 @@ final class DividerController: NSObject {
             .filter({ $0.item.processIdentifier == ownIdentifier && $0.item.isLaidOut })
             .max(by: { $0.item.frame.maxX < $1.item.frame.maxX })?.item.frame
         else { return nil }
-        let excluded = Set([ownIdentifier, spacer?.processIdentifier].compactMap { $0 })
+        let excluded = Set([ownIdentifier] + spacerProcesses.values.map(\.processIdentifier))
         let group = Divider.groupItems(items.map(\.item), dividerFrame: dividerFrame, excludingProcesses: excluded)
         return (group, dividerFrame)
     }
@@ -599,18 +583,25 @@ final class DividerController: NSObject {
 
     // MARK: Arrangement help
 
-    /// Shows the group and, beside it, how to arrange its icons. The group stays shown
-    /// while the help is open, because the panel counts as the pointer's presence in a
-    /// peek; see `startPeek`.
-    private func openArrangementHelp() async {
+    /// Shows the group and, beside it, how to arrange its icons, until the help closes;
+    /// see `panelClosed`.
+    private func openArrangementHelp() {
         guard AccessibilityClient.isTrusted else {
             panel.show(state: .needsAccessibility, at: dividerAnchor())
             return
         }
-        let items = await AccessibilityClient.items()
+        guard visibility.activity != .arranging else { return }
         panel.show(state: .arrangementHelp(shortcutTitle: hotKey?.shortcut.title), at: dividerAnchor())
-        let processes = group(of: items).map { Set($0.group.map(\.processIdentifier)) } ?? []
-        startPeek(groupProcesses: processes)
+        _ = begin(.arranging)
+    }
+
+    /// The panel closed. Closing the arrangement help, by Done or a click on the chevron,
+    /// ends arranging.
+    private func panelClosed(_ state: GroupPanel.State) {
+        guard case .arrangementHelp = state, let ticket = visibility.current, ticket.activity == .arranging else {
+            return
+        }
+        finish(ticket)
     }
 
     private func closePanel() {
@@ -620,30 +611,23 @@ final class DividerController: NSObject {
     }
 
     @objc private func arrangeIcons() {
-        Task { await openArrangementHelp() }
+        openArrangementHelp()
     }
 
     // MARK: Pressing a hidden icon
 
+    /// Shows the group, presses the chosen icon, and keeps the group shown until the
+    /// icon's menu closes.
     private func press(_ entry: GroupPanel.Entry) {
         panel.close()
-        pressTask?.cancel()
-        pressTask = Task { await reveal(andPress: entry.accessible) }
+        let ticket = begin(.pressing)
+        activityTask = Task { [weak self] in
+            await self?.reveal(andPress: entry.accessible)
+            self?.finish(ticket)
+        }
     }
 
     private func reveal(andPress target: AccessibleItem) async {
-        // A press that cancels an earlier one takes over the duty to hide the group again.
-        let hidesAfterward = !isShownOnRequest
-        if hidesAfterward {
-            isShowingForPress = true
-            applyLength()
-        }
-        defer {
-            if hidesAfterward && !Task.isCancelled {
-                isShowingForPress = false
-                applyLength()
-            }
-        }
         let frame = await settledFrame(of: target)
         // A later choice took over while this one waited; it must not press as well.
         guard !Task.isCancelled else { return }
@@ -653,10 +637,9 @@ final class DividerController: NSObject {
         }
         let pressed = AccessibilityClient.press(target.element)
         Self.log.info("pressed \(target.item.name, privacy: .public): \(pressed)")
-        guard hidesAfterward else { return }
         var session = RevealSession(startTime: ProcessInfo.processInfo.systemUptime)
-        while !Task.isCancelled {
-            try? await Task.sleep(for: .milliseconds(250))
+        while true {
+            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
             let windows = WindowServer.onScreenWindows()
             let isOpen = MenuDetection.isMenuOpen(
                 windows: windows,
@@ -691,13 +674,26 @@ final class DividerController: NSObject {
         closePanel()
         guard let button = dividerItem?.button else { return }
         let menu = NSMenu()
+        if spacerLifecycle.isFailed {
+            let failure = NSMenuItem(
+                title: "The spacer could not be placed, so no icons are hidden.",
+                action: nil,
+                keyEquivalent: ""
+            )
+            failure.isEnabled = false
+            menu.addItem(failure)
+            let retryItem = NSMenuItem(title: "Try Hiding Icons Again", action: #selector(retrySpacer), keyEquivalent: "")
+            retryItem.target = self
+            menu.addItem(retryItem)
+            menu.addItem(.separator())
+        }
         let alwaysItem = NSMenuItem(
             title: "Always Show Where It Fits",
             action: #selector(toggleAlwaysShowsGroupWhereItFits),
             keyEquivalent: ""
         )
         alwaysItem.target = self
-        alwaysItem.state = alwaysShowsGroupWhereItFits ? .on : .off
+        alwaysItem.state = visibility.alwaysShowsWhereItFits ? .on : .off
         menu.addItem(alwaysItem)
         let listItem = NSMenuItem(title: "List Hidden Icons", action: #selector(listHiddenIcons), keyEquivalent: "")
         listItem.target = self
@@ -792,7 +788,7 @@ final class DividerController: NSObject {
     }
 
     @objc private func toggleAlwaysShowsGroupWhereItFits() {
-        setAlwaysShowsGroupWhereItFits(!alwaysShowsGroupWhereItFits)
+        setAlwaysShowsGroupWhereItFits(!visibility.alwaysShowsWhereItFits)
     }
 
     @objc private func showAbout() {
@@ -864,7 +860,7 @@ final class DividerController: NSObject {
                 self.trustTimer = nil
                 guard !self.defaults.bool(forKey: Self.positionSeededKey) else {
                     Self.log.info("Accessibility permission granted; hiding the group")
-                    self.applyLength()
+                    self.applyVisibility()
                     return
                 }
                 self.defaults.removeObject(forKey: Self.preferredPositionKey(Self.dividerAutosaveName))

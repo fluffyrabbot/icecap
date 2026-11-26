@@ -31,18 +31,16 @@ final class SpacerProcess {
     private let input = Pipe()
     private let output = Pipe()
     private var lines = LineBuffer()
-    /// Whether `end()` was called, so that the helper's exit is expected.
-    private var isEnding = false
 
     /// Starts the helper.
     ///
     /// - Parameters:
-    ///   - onPlaced: Called once the spacer has reached its preferred position.
-    ///   - onUnexpectedExit: Called if the helper ends without `end()` having been called.
+    ///   - onReport: Called with each report from the helper.
+    ///   - onExit: Called once the helper has exited, for whatever reason.
     init(
         preferredPosition: CGFloat,
-        onPlaced: @escaping @MainActor () -> Void,
-        onUnexpectedExit: @escaping @MainActor (Int32) -> Void
+        onReport: @escaping @MainActor (SpacerHelper.Report) -> Void,
+        onExit: @escaping @MainActor (Int32) -> Void
     ) throws {
         self.preferredPosition = preferredPosition
         process.executableURL = Self.executableURL
@@ -52,22 +50,22 @@ final class SpacerProcess {
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.receive(data, onPlaced: onPlaced) }
+                MainActor.assumeIsolated { self?.receive(data, onReport: onReport) }
             }
         }
         process.terminationHandler = { [weak self] process in
             let status = process.terminationStatus
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self, !self.isEnding else { return }
-                    self.output.fileHandleForReading.readabilityHandler = nil
-                    onUnexpectedExit(status)
+                    self?.output.fileHandleForReading.readabilityHandler = nil
+                    onExit(status)
                 }
             }
         }
         do {
             try process.run()
         } catch {
+            output.fileHandleForReading.readabilityHandler = nil
             throw LaunchError(executableURL: Self.executableURL, underlying: error)
         }
     }
@@ -77,33 +75,25 @@ final class SpacerProcess {
         do {
             try input.fileHandleForWriting.write(contentsOf: SpacerHelper.line(command))
         } catch {
-            // The helper has ended; its termination handler reports that.
+            // The helper has ended; `onExit` reports that.
             Self.log.error("could not send \(command.rawValue, privacy: .public) to the spacer: \(error.localizedDescription, privacy: .public)")
         }
     }
 
-    /// Ends the helper, which removes the spacer, and returns once it has exited.
-    func end() async {
-        isEnding = true
-        output.fileHandleForReading.readabilityHandler = nil
+    /// Tells the helper to end, which removes the spacer; `onExit` reports when it has.
+    func end() {
         // Closing its input ends the helper; the signal ends one that is not reading.
         try? input.fileHandleForWriting.close()
         if process.isRunning { process.terminate() }
-        while process.isRunning {
-            try? await Task.sleep(for: .milliseconds(20))
-        }
     }
 
-    private func receive(_ data: Data, onPlaced: @MainActor () -> Void) {
-        guard !isEnding else { return }
+    private func receive(_ data: Data, onReport: @MainActor (SpacerHelper.Report) -> Void) {
         for line in lines.append(data) {
             guard let report = SpacerHelper.Report(rawValue: line) else {
                 Self.log.error("unknown report from the spacer: \(line, privacy: .public)")
                 continue
             }
-            switch report {
-            case .placed: onPlaced()
-            }
+            onReport(report)
         }
     }
 }

@@ -48,15 +48,6 @@ public enum Divider {
         dividerPreferredPosition + spacerPositionOffset
     }
 
-    /// Whether the spacer's recorded preferred position still places it immediately left
-    /// of the divider. A person who drags the divider with ⌘ changes the divider's.
-    public static func isSpacerBesideDivider(
-        spacerPreferredPosition: CGFloat,
-        dividerPreferredPosition: CGFloat
-    ) -> Bool {
-        abs(spacerPreferredPosition - Self.spacerPreferredPosition(dividerPreferredPosition: dividerPreferredPosition)) < 0.01
-    }
-
     /// The preferred position to give the divider on first launch: immediately left of
     /// the leftmost icon that belongs to the system, so that every other application's
     /// icon starts in the group.

@@ -35,6 +35,8 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
 
     var onChoose: ((Entry) -> Void)?
     var onShowInMenuBar: (() -> Void)?
+    /// Called with the state the panel showed, whenever it closes, however it closes.
+    var onClose: ((State) -> Void)?
 
     private var window: GroupPanelWindow?
     private var monitors: [Any] = []
@@ -100,6 +102,7 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
         self.window = nil
         searchField = nil
         window.orderOut(nil)
+        onClose?(state)
     }
 
     static func openAccessibilitySettings() {

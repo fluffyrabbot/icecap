@@ -59,9 +59,9 @@ can be removed with `tccutil reset Accessibility io.github.fluffyrabbot.icecap`.
 | Click the chevron | Shows the group in the menu bar if it fits beside the front application's menus and any camera housing, and hides it again once the pointer has been out of the menu bar for a second with no menu open. Otherwise lists the hidden icons: pick one to show the group, open that icon's menu, and hide the group again once the menu closes. Click again to hide the group at once. |
 | ⌥-click the chevron, or press ⌃⌥⌘Space in any application | Lists the hidden icons, whether or not the group fits. Press the shortcut again to close the list. |
 | Type in the list | Narrows it to the icons whose names match. ↑ and ↓ move the selection, Return opens the selected icon's menu, Escape clears the filter and then closes the list. |
-| Right-click the chevron | Always show the group where it fits, list hidden icons, arrange icons, choose the keyboard shortcut (⌃⌥⌘Space, ⌃⌥⌘H, ⌃⌥⌘M or none), open at login, Accessibility settings, about icecap, check for updates, quit. |
+| Right-click the chevron | Try hiding icons again, when the spacer could not be placed; always show the group where it fits, list hidden icons, arrange icons, choose the keyboard shortcut (⌃⌥⌘Space, ⌃⌥⌘H, ⌃⌥⌘M or none), open at login, Accessibility settings, about icecap, check for updates, quit. |
 | Show the group, then ⌘-drag an icon across the chevron | Moves the icon into or out of the group. |
-| Choose Arrange Icons… | Shows the group beside a note on how to arrange it, until Done is clicked. The note also opens by itself when icecap first places the chevron. |
+| Choose Arrange Icons… | Shows the group beside a note on how to arrange it, until Done or the chevron is clicked. The note also opens by itself when icecap first places the chevron. |
 | Choose Always Show Where It Fits | Keeps the group shown whenever it fits, and hides it where it does not, until the item is chosen again or the chevron is clicked while the group is shown. |
 | ⌘-drag the chevron | Moves the group's boundary. The spacer follows within a second. |
 
@@ -78,10 +78,12 @@ status items by the preferred position each process records for them, the smalle
 the right, so icecap starts the helper with the divider's position plus 0.5. icecap sends
 `hide` and `show` on the helper's standard input, and the helper answers `placed` once
 its item has settled. When the divider is ⌘-dragged, icecap ends the helper and starts
-another at the new position: macOS does not reliably place a status item added again
-within a process that has seen a drag, but places one from a new process correctly (see
-[docs/OBSERVATIONS.md](docs/OBSERVATIONS.md)). The helper ends when its input closes,
-so it ends with icecap however icecap ends.
+another at the new position once the last has exited: macOS does not reliably place a
+status item added again within a process that has seen a drag, but places one from a new
+process correctly (see [docs/OBSERVATIONS.md](docs/OBSERVATIONS.md)). A helper that
+exits unexpectedly, does not answer `placed` within five seconds, or widens its spacer
+and pushes the chevron off the display has failed, and icecap starts another. The helper
+ends when its input closes, so it ends with icecap however icecap ends.
 
 On a click, icecap measures the group from the icons' Accessibility frames, which keep
 their widths and spacing while pushed off the display. The group fits if it would end at
@@ -132,10 +134,11 @@ Install Update….
 - Icons in the panel show their application's icon, not their live picture,
   because the system will not capture an icon that has been pushed off the display.
 - The group shows for about a second while the spacer's helper restarts after the
-  chevron is dragged. If the helper restarts more than three times in a minute, icecap
-  stops and leaves the group shown; dragging the chevron again tries once more. icecap notices the
-  drag by the change in its recorded position, and macOS rewrites that when other icons
-  are dragged, so arranging other icons may also restart the helper once.
+  chevron is dragged. If three helpers in a row fail at one position, icecap leaves the
+  group shown and says so at the top of the context menu, with Try Hiding Icons Again;
+  dragging the chevron also tries again. icecap notices a drag by the change in the
+  chevron's recorded position, which macOS may also rewrite when other icons are dragged,
+  so arranging other icons may restart the helper once.
 - The Accessibility API reports icon positions for the display whose menu bar is active.
 
 ## Development

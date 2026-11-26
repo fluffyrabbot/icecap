@@ -131,12 +131,6 @@ private func item(_ processIdentifier: Int32, _ bundle: String?, x: CGFloat, wid
         #expect(position > 503)
         #expect(position < 504)
     }
-
-    @Test func spacerIsBesideTheDividerUntilTheDividerIsDragged() {
-        #expect(Divider.isSpacerBesideDivider(spacerPreferredPosition: 503.5, dividerPreferredPosition: 503))
-        // Dragging the divider with ⌘ records a new preferred position for it alone.
-        #expect(!Divider.isSpacerBesideDivider(spacerPreferredPosition: 503.5, dividerPreferredPosition: 620))
-    }
 }
 
 @Suite struct ExpansionTests {
