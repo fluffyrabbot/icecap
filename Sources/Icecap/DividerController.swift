@@ -32,12 +32,30 @@ final class DividerController: NSObject {
     private var spacerLifecycle = SpacerLifecycle()
     /// The running helpers by generation: the current one and any still ending.
     private var spacerProcesses: [SpacerLifecycle.Generation: SpacerProcess] = [:]
+    private struct RefreshKinds: OptionSet {
+        let rawValue: Int
+        static let boundary = RefreshKinds(rawValue: 1 << 0)
+        static let inventory = RefreshKinds(rawValue: 1 << 1)
+    }
+
     private let panel = GroupPanel()
     private let updater = Updater()
     static let alwaysShowsGroupWhereItFitsKey = "AlwaysShowsGroupWhereItFits"
-    /// How often the fit is checked again while the group is always shown where it fits.
-    /// Each check reads only this application's own icons and the front application's menus.
-    static let fitCheckInterval: TimeInterval = 1
+    /// How often the active display and front-menu boundary are refreshed while the group
+    /// is always shown where it fits, catching the active menu bar moving between displays.
+    static let alwaysShowBoundaryInterval: TimeInterval = 1
+    /// How often the status area boundary is refreshed while idle so warm clicks stay ready.
+    static let idleBoundaryInterval: TimeInterval = 10
+    /// How often the hidden group inventory is refreshed while hidden to catch icon changes
+    /// that emit no workspace notifications.
+    static let idleInventoryInterval: TimeInterval = 30
+    /// Delay after hiding before reading the hidden group so icons have finished moving
+    /// off-screen.
+    static let settleDelay = Duration.milliseconds(700)
+    static let settleRetryDelay = Duration.milliseconds(500)
+    static let settleRetryLimit = 4
+    static let notificationRefreshDelay = Duration.milliseconds(250)
+    static let appLaunchRefreshDelay = Duration.milliseconds(450)
     /// Whether the group is shown or hidden; see `GroupVisibility`. The choice to show it
     /// always where it fits is kept in the defaults.
     private var visibility: GroupVisibility
@@ -51,14 +69,24 @@ final class DividerController: NSObject {
     private var opensArrangementHelpWhenPlaced = false
     /// The processes that own the group's icons, as last listed in the panel.
     private var listedGroupProcesses: Set<Int32> = []
-    /// The group's width as last measured while it was hidden; see `Divider.groupFits`.
-    private var hiddenGroupWidth: CGFloat = 0
-    /// Whether `hiddenGroupWidth` has been measured since launch. Until it has, every fit
-    /// check measures the group.
-    private var isGroupMeasured = false
-    private var fitTimer: Timer?
-    private var fitObservers: [(NotificationCenter, NSObjectProtocol)] = []
-    private var isCheckingFit = false
+    /// Cached hidden-group inventory and active-display status area boundary.
+    private var fit = MenuBarFit()
+    private var pendingClickTracker = PendingClickTracker()
+    private var pendingClickTask: Task<Void, Never>?
+    private var lastAppliedCommand: (generation: SpacerLifecycle.Generation, command: SpacerHelper.Command)?
+    private var pushedOffCheckTask: Task<Void, Never>?
+    private var refreshTask: Task<Void, Never>?
+    private var pendingRefreshKinds: RefreshKinds = []
+    private var boundaryRevision: UInt64 = 0
+    private var inventoryRevision: UInt64 = 0
+    private var delayedBoundaryRefreshTask: Task<Void, Never>?
+    private var delayedInventoryRefreshTask: Task<Void, Never>?
+    private var settleRetryTask: Task<Void, Never>?
+    private var settleRetryAttempts = 0
+    private var boundaryTimer: Timer?
+    private var boundaryTimerInterval: TimeInterval = 0
+    private var inventoryTimer: Timer?
+    private var environmentObservers: [(NotificationCenter, NSObjectProtocol)] = []
     private var trustTimer: Timer?
     /// The listing of the group's icons under way for the panel, which a second request
     /// to toggle the panel cancels.
@@ -87,7 +115,6 @@ final class DividerController: NSObject {
         }
         panel.onClose = { [weak self] state in self?.panelClosed(state) }
         updater.onWaitingUpdateChange = { [weak self] in self?.updateChevron() }
-        if visibility.alwaysShowsWhereItFits { watchFit() }
     }
 
     func start() async {
@@ -121,6 +148,7 @@ final class DividerController: NSObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.followDivider() }
         }
+        startObservingEnvironment()
         // The divider is given time to reach its own position before the spacer is
         // placed beside it.
         Task {
@@ -145,6 +173,7 @@ final class DividerController: NSObject {
     /// status item that is already wide at the far left; or a helper ended.
     private func handle(_ event: SpacerLifecycle.Event) {
         let previousPhase = spacerLifecycle.phase
+        let previousPlacedGeneration = spacerLifecycle.placedGeneration
         let time = ProcessInfo.processInfo.systemUptime
         var effects = spacerLifecycle.handle(event, at: time)
         while !effects.isEmpty {
@@ -175,11 +204,19 @@ final class DividerController: NSObject {
         }
         let phase = spacerLifecycle.phase
         guard phase != previousPhase else { return }
+        if spacerLifecycle.placedGeneration != previousPlacedGeneration {
+            cancelPendingClick()
+            pushedOffCheckTask?.cancel()
+            pushedOffCheckTask = nil
+            lastAppliedCommand = nil
+            invalidateAllFit()
+        }
         Self.log.info("spacer \(String(describing: event), privacy: .public): \(String(describing: phase), privacy: .public)")
         if spacerLifecycle.isFailed {
             Self.log.error("the spacer could not be placed after \(SpacerLifecycle.failureLimit) tries; the group stays shown")
         }
         applyVisibility()
+        updateRefreshTimers()
         if case .placed = phase { spacerPlaced() }
     }
 
@@ -190,12 +227,10 @@ final class DividerController: NSObject {
     }
 
     private func spacerPlaced() {
-        Task {
-            await checkFit(measuringGroup: true)
-            if opensArrangementHelpWhenPlaced {
-                opensArrangementHelpWhenPlaced = false
-                openArrangementHelp()
-            }
+        scheduleRefresh(visibility.isHidden ? .boundary : [.boundary, .inventory])
+        if opensArrangementHelpWhenPlaced {
+            opensArrangementHelpWhenPlaced = false
+            openArrangementHelp()
         }
     }
 
@@ -230,16 +265,41 @@ final class DividerController: NSObject {
     private func applyVisibility() {
         visibility.isPermitted = AccessibilityClient.isTrusted
         updateChevron()
+        if !visibility.isPermitted {
+            cancelPendingClick()
+            pushedOffCheckTask?.cancel()
+            pushedOffCheckTask = nil
+            invalidateAllFit()
+            updateRefreshTimers()
+        }
         guard let generation = spacerLifecycle.placedGeneration, let spacer = spacerProcesses[generation] else { return }
-        let isHidden = visibility.isHidden
-        spacer.send(isHidden ? .hide : .show)
-        guard isHidden else { return }
-        Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(600))
-            guard let self, self.spacerLifecycle.placedGeneration == generation, self.visibility.isHidden,
+        let desiredCommand: SpacerHelper.Command = visibility.isHidden ? .hide : .show
+        let commandChanged = lastAppliedCommand?.generation != generation || lastAppliedCommand?.command != desiredCommand
+        guard commandChanged else { return }
+        guard spacer.send(desiredCommand) else { return }
+        lastAppliedCommand = (generation, desiredCommand)
+        pushedOffCheckTask?.cancel()
+        pushedOffCheckTask = nil
+        guard desiredCommand == .hide else { return }
+        pushedOffCheckTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
+            guard let self,
+                  self.spacerLifecycle.placedGeneration == generation,
+                  self.visibility.isHidden,
+                  self.lastAppliedCommand?.generation == generation,
+                  self.lastAppliedCommand?.command == .hide,
                   !self.isDividerOnScreen
             else { return }
             self.handle(.dividerPushedOff(generation))
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        let context = MenuBarFit.Context(
+            displayIdentifier: nil,
+            frontApplicationProcessIdentifier: nil,
+            spacerGeneration: generation
+        )
+        if !fit.hasValidInventory(for: context, at: now) {
+            scheduleInventoryRefresh(after: Self.settleDelay, includeBoundary: true)
         }
     }
 
@@ -273,43 +333,66 @@ final class DividerController: NSObject {
     }
 
     private func setAlwaysShowsGroupWhereItFits(_ showing: Bool) {
+        cancelPendingClick()
         defaults.set(showing, forKey: Self.alwaysShowsGroupWhereItFitsKey)
         visibility.alwaysShowsWhereItFits = showing
-        if showing {
-            watchFit()
-            Task { await checkFit(measuringGroup: true) }
-        } else {
-            stopWatchingFit()
+        if showing, let generation = spacerLifecycle.placedGeneration {
+            let context = MenuBarFit.Context(
+                displayIdentifier: currentDisplayIdentifier(),
+                frontApplicationProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                spacerGeneration: generation
+            )
+            if case .fits = fit.decision(for: context, at: ProcessInfo.processInfo.systemUptime) {
+                visibility.fits = true
+            }
         }
+        updateRefreshTimers()
         applyVisibility()
+        if showing {
+            scheduleRefresh([.boundary, .inventory])
+        }
     }
 
     // MARK: Activities
 
     /// Begins the activity, ending the one under way and cancelling its work.
     private func begin(_ activity: GroupVisibility.Activity) -> GroupVisibility.Ticket {
+        cancelPendingClick()
         activityTask?.cancel()
         activityTask = nil
         let ticket = visibility.begin(activity)
         Self.log.info("\(String(describing: activity), privacy: .public) began")
         applyVisibility()
+        updateRefreshTimers()
         return ticket
     }
 
     /// Ends the ticket's activity, unless another has superseded it.
     private func finish(_ ticket: GroupVisibility.Ticket) {
+        let wasHidden = visibility.isHidden
         guard visibility.end(ticket) else { return }
         activityTask = nil
         Self.log.info("\(String(describing: ticket.activity), privacy: .public) ended")
         applyVisibility()
+        updateRefreshTimers()
+        if !wasHidden, visibility.isHidden, ticket.activity != .arranging {
+            scheduleInventoryRefresh(after: Self.settleDelay, includeBoundary: false)
+        }
     }
 
     /// Ends whatever activity is under way, at once.
     private func endActivity() {
+        let wasHidden = visibility.isHidden
+        let endedActivity = visibility.activity
+        cancelPendingClick()
         activityTask?.cancel()
         activityTask = nil
         visibility.endActivity()
         applyVisibility()
+        updateRefreshTimers()
+        if !wasHidden, visibility.isHidden, endedActivity != .arranging {
+            scheduleInventoryRefresh(after: Self.settleDelay, includeBoundary: false)
+        }
     }
 
     // MARK: Peek
@@ -351,144 +434,569 @@ final class DividerController: NSObject {
     }
 
     @objc private func dividerClicked(_ sender: Any?) {
+        let clickStarted = ContinuousClock.now
         let event = NSApp.currentEvent
         if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
+            cancelPendingClick()
             showContextMenu()
-        } else if panel.isVisible || panelOpenTask != nil {
-            // Closing the arrangement help also ends arranging; see `panelClosed`.
-            closePanel()
-        } else if event?.modifierFlags.contains(.option) == true {
-            openPanel()
-        } else if visibility.activity != nil {
-            endActivity()
-        } else if visibility.isShownWhereItFits {
-            setAlwaysShowsGroupWhereItFits(false)
-        } else {
-            Task { await peekOrOpenPanel() }
-        }
-    }
-
-    /// Peeks at the group if it fits on the display whose menu bar holds the divider,
-    /// beside the front application's menus and any camera housing; otherwise opens the
-    /// panel.
-    private func peekOrOpenPanel() async {
-        guard AccessibilityClient.isTrusted else {
-            panel.show(state: .needsAccessibility, at: dividerAnchor())
             return
         }
-        let items = await AccessibilityClient.items()
-        if let (group, dividerFrame) = group(of: items),
-           let statusAreaMinX = await statusAreaMinX(around: dividerFrame) {
-            let width = Divider.groupWidth(group)
-            if !visibility.isShown { recordHiddenGroupWidth(of: group) }
-            if Divider.groupFits(width: max(width, hiddenGroupWidth), dividerFrame: dividerFrame, statusAreaMinX: statusAreaMinX) {
-                Self.log.info("group of \(group.count) fits; peeking at it")
-                startPeek(groupProcesses: Set(group.map(\.processIdentifier)))
-                return
-            }
+        if event?.modifierFlags.contains(.option) == true {
+            cancelPendingClick()
+            openPanel()
+            return
         }
-        showPanel(listing: items)
+        let now = ProcessInfo.processInfo.systemUptime
+        let context = currentClickContext()
+        let plan = fit.primaryClickPlan(
+            isPermitted: AccessibilityClient.isTrusted,
+            isPanelOpen: panel.isVisible || panelOpenTask != nil,
+            hasPendingClick: pendingClickTracker.isPending,
+            activity: visibility.activity,
+            isShownWhereItFits: visibility.isShownWhereItFits,
+            context: context,
+            at: now
+        )
+        switch plan {
+        case .closePanel:
+            // Closing the arrangement help also ends arranging; see `panelClosed`.
+            closePanel()
+        case .cancelPendingClick:
+            cancelPendingClick()
+        case .endActivity:
+            endActivity()
+        case .disableAlwaysShow:
+            setAlwaysShowsGroupWhereItFits(false)
+        case .showNeedsAccessibility:
+            panel.show(state: .needsAccessibility, at: dividerAnchor())
+        case .startPeek(let groupProcesses):
+            startPeek(groupProcesses: groupProcesses)
+            let elapsed = clickStarted.duration(to: .now)
+            Self.log.info("warm chevron expand in \(Self.formattedMilliseconds(elapsed), privacy: .public) ms")
+        case .openPanel:
+            openPanel()
+        case .refreshBoundaryThenRoute:
+            routeClickAfterBoundaryRefresh(context: context, clickStarted: clickStarted)
+        case .refreshAllThenRoute:
+            routeClickAfterFullRefresh(context: context, clickStarted: clickStarted)
+        }
     }
 
-    // MARK: Fit
+    private func cancelPendingClick() {
+        _ = pendingClickTracker.cancel()
+        pendingClickTask?.cancel()
+        pendingClickTask = nil
+    }
 
-    /// Checks the fit again whenever it may have changed: when another application comes
-    /// to the front, when one starts or ends, when the displays change, and every
-    /// `fitCheckInterval`, which catches the active menu bar moving to another display.
-    private func watchFit() {
-        guard fitTimer == nil else { return }
-        fitTimer = Timer.scheduledTimer(withTimeInterval: Self.fitCheckInterval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                Task { await self.checkFit(measuringGroup: false) }
+    private func routeClickAfterBoundaryRefresh(
+        context: MenuBarFit.Context,
+        clickStarted: ContinuousClock.Instant
+    ) {
+        cancelPendingClick()
+        let token = pendingClickTracker.begin()
+        let ownIdentifier = ProcessInfo.processInfo.processIdentifier
+        let startBoundaryRevision = boundaryRevision
+        let frontPID = context.frontApplicationProcessIdentifier
+        let generation = context.spacerGeneration
+        pendingClickTask = Task { [weak self] in
+            async let ownItemsTask = AccessibilityClient.items(ofProcess: ownIdentifier, includeDescriptions: false)
+            async let menuTitlesTask: [CGRect]? = {
+                guard let frontPID else { return nil }
+                return await AccessibilityClient.frontMenuTitleFrames(ofProcess: frontPID)
+            }()
+            let ownItems = await ownItemsTask
+            let menuTitleFrames = await menuTitlesTask
+            guard let self, !Task.isCancelled else { return }
+            self.pendingClickTask = nil
+            guard
+                self.pendingClickTracker.consume(token),
+                AccessibilityClient.isTrusted,
+                self.visibility.activity == nil,
+                !self.panel.isVisible,
+                self.panelOpenTask == nil
+            else { return }
+
+            let now = ProcessInfo.processInfo.systemUptime
+            let latestContext = self.currentClickContext()
+            if let generation,
+               self.spacerLifecycle.placedGeneration == generation,
+               let dividerFrame = self.dividerFrame(in: ownItems) {
+                self.recordBoundaryIfCurrent(
+                    dividerFrame: dividerFrame,
+                    menuTitleFrames: menuTitleFrames,
+                    frontPID: frontPID,
+                    generation: generation,
+                    startBoundaryRevision: startBoundaryRevision,
+                    at: now
+                )
+            } else if self.boundaryRevision == startBoundaryRevision,
+                      frontPID == NSWorkspace.shared.frontmostApplication?.processIdentifier {
+                self.fit.invalidateBoundary()
+            }
+
+            switch self.fit.decision(for: latestContext, at: now) {
+            case .fits(let groupProcesses):
+                self.startPeek(groupProcesses: groupProcesses)
+                let elapsed = clickStarted.duration(to: .now)
+                Self.log.info("boundary-refreshed chevron expand in \(Self.formattedMilliseconds(elapsed), privacy: .public) ms")
+            case .doesNotFit, .unknown:
+                self.openPanel()
             }
         }
-        let workspace = NSWorkspace.shared.notificationCenter
-        let names: [(NotificationCenter, Notification.Name)] = [
-            (workspace, NSWorkspace.didActivateApplicationNotification),
-            (workspace, NSWorkspace.didLaunchApplicationNotification),
-            (workspace, NSWorkspace.didTerminateApplicationNotification),
-            (NotificationCenter.default, NSApplication.didChangeScreenParametersNotification),
-        ]
-        fitObservers = names.map { center, name in
-            let observer = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    Task {
-                        // The menu bar is laid out again shortly after the change.
-                        try? await Task.sleep(for: .milliseconds(400))
-                        await self.checkFit(measuringGroup: true)
-                    }
+    }
+
+    private func routeClickAfterFullRefresh(
+        context: MenuBarFit.Context,
+        clickStarted: ContinuousClock.Instant
+    ) {
+        cancelPendingClick()
+        let token = pendingClickTracker.begin()
+        let startInventoryRevision = inventoryRevision
+        let startBoundaryRevision = boundaryRevision
+        let startWasHidden = visibility.isHidden
+        let frontPID = context.frontApplicationProcessIdentifier
+        let generation = context.spacerGeneration
+        pendingClickTask = Task { [weak self] in
+            async let itemsTask = AccessibilityClient.items(includeDescriptions: true)
+            async let menuTitlesTask: [CGRect]? = {
+                guard let frontPID else { return nil }
+                return await AccessibilityClient.frontMenuTitleFrames(ofProcess: frontPID)
+            }()
+            let items = await itemsTask
+            let menuTitleFrames = await menuTitlesTask
+            guard let self, !Task.isCancelled else { return }
+            self.pendingClickTask = nil
+            guard
+                self.pendingClickTracker.consume(token),
+                AccessibilityClient.isTrusted,
+                self.visibility.activity == nil,
+                !self.panel.isVisible,
+                self.panelOpenTask == nil
+            else { return }
+
+            let now = ProcessInfo.processInfo.systemUptime
+            let latestContext = self.currentClickContext()
+            if let (group, dividerFrame) = self.group(of: items) {
+                if let generation, self.spacerLifecycle.placedGeneration == generation {
+                    self.recordInventoryIfCurrent(
+                        group: group,
+                        generation: generation,
+                        startInventoryRevision: startInventoryRevision,
+                        startWasHidden: startWasHidden,
+                        scheduleRetryOnMidMove: true,
+                        at: now
+                    )
+                    self.recordBoundaryIfCurrent(
+                        dividerFrame: dividerFrame,
+                        menuTitleFrames: menuTitleFrames,
+                        frontPID: frontPID,
+                        generation: generation,
+                        startBoundaryRevision: startBoundaryRevision,
+                        at: now
+                    )
+                } else if self.spacerLifecycle.placedGeneration == nil,
+                          let screen = self.screen(containingAXFrame: dividerFrame),
+                          let menuTitleFrames,
+                          Divider.groupFits(
+                              width: Divider.groupWidth(group),
+                              dividerFrame: dividerFrame,
+                              statusAreaMinX: self.statusAreaMinX(on: screen, menuTitleFrames: menuTitleFrames)
+                          ) {
+                    self.startPeek(groupProcesses: Set(group.map(\.processIdentifier)))
+                    return
                 }
+            } else if self.boundaryRevision == startBoundaryRevision,
+                      frontPID == NSWorkspace.shared.frontmostApplication?.processIdentifier {
+                self.fit.invalidateBoundary()
+            }
+
+            if case .fits(let groupProcesses) = self.fit.decision(for: latestContext, at: now) {
+                self.startPeek(groupProcesses: groupProcesses)
+                let elapsed = clickStarted.duration(to: .now)
+                Self.log.info("cold chevron expand in \(Self.formattedMilliseconds(elapsed), privacy: .public) ms")
+                return
+            }
+            self.showPanel(listing: items)
+        }
+    }
+
+    // MARK: Fit background refresh
+
+    private func startObservingEnvironment() {
+        guard environmentObservers.isEmpty else { return }
+        let workspace = NSWorkspace.shared.notificationCenter
+        let entries: [(NotificationCenter, Notification.Name, @MainActor @Sendable (Int32?, NSApplication.ActivationPolicy?) -> Void)] = [
+            (workspace, NSWorkspace.didActivateApplicationNotification, { [weak self] _, _ in
+                self?.invalidateBoundaryAndRefresh(delay: Self.notificationRefreshDelay)
+            }),
+            (workspace, NSWorkspace.activeSpaceDidChangeNotification, { [weak self] _, _ in
+                self?.invalidateBoundaryAndRefresh(delay: Self.notificationRefreshDelay)
+            }),
+            (workspace, NSWorkspace.didLaunchApplicationNotification, { [weak self] _, policy in
+                guard let self else { return }
+                if policy == .prohibited { return }
+                if self.visibility.isHidden {
+                    self.invalidateInventoryAndRefresh(delay: Self.appLaunchRefreshDelay)
+                } else {
+                    self.scheduleInventoryRefresh(after: Self.appLaunchRefreshDelay, includeBoundary: false)
+                }
+            }),
+            (workspace, NSWorkspace.didTerminateApplicationNotification, { [weak self] processIdentifier, policy in
+                guard let self else { return }
+                if let processIdentifier {
+                    let owned = self.fit.ownsGroupProcess(processIdentifier)
+                    if !owned && policy == .prohibited { return }
+                }
+                if self.visibility.isHidden {
+                    self.invalidateInventoryAndRefresh(delay: Self.notificationRefreshDelay)
+                } else {
+                    self.scheduleInventoryRefresh(after: Self.notificationRefreshDelay, includeBoundary: false)
+                }
+            }),
+            (workspace, NSWorkspace.didWakeNotification, { [weak self] _, _ in
+                self?.invalidateAllAndRefresh(delay: Self.appLaunchRefreshDelay)
+            }),
+            (workspace, NSWorkspace.screensDidWakeNotification, { [weak self] _, _ in
+                self?.invalidateAllAndRefresh(delay: Self.appLaunchRefreshDelay)
+            }),
+            (NotificationCenter.default, NSApplication.didChangeScreenParametersNotification, { [weak self] _, _ in
+                self?.invalidateAllAndRefresh(delay: Self.appLaunchRefreshDelay)
+            }),
+        ]
+        environmentObservers = entries.map { center, name, handler in
+            let observer = center.addObserver(forName: name, object: nil, queue: .main) { notification in
+                let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                let processIdentifier = application?.processIdentifier
+                let activationPolicy = application?.activationPolicy
+                MainActor.assumeIsolated { handler(processIdentifier, activationPolicy) }
             }
             return (center, observer)
         }
+        updateRefreshTimers()
     }
 
-    private func stopWatchingFit() {
-        fitTimer?.invalidate()
-        fitTimer = nil
-        for (center, observer) in fitObservers { center.removeObserver(observer) }
-        fitObservers = []
-    }
-
-    /// Shows or hides the group, while it is always shown where it fits, as it now fits
-    /// or not on the display whose menu bar is active.
-    ///
-    /// - Parameter measuringGroup: Whether to read every application's icons, which takes
-    ///   up to two seconds, to measure the group again; otherwise the last width measured
-    ///   while the group was hidden is used.
-    private func checkFit(measuringGroup: Bool) async {
-        guard visibility.alwaysShowsWhereItFits, spacerLifecycle.placedGeneration != nil,
-              visibility.activity != .pressing, !isCheckingFit, AccessibilityClient.isTrusted
-        else { return }
-        isCheckingFit = true
-        defer { isCheckingFit = false }
-        let ownIdentifier = ProcessInfo.processInfo.processIdentifier
-        let measuringGroup = measuringGroup || !isGroupMeasured
-        let items = await AccessibilityClient.items(ofProcess: measuringGroup ? nil : ownIdentifier)
-        guard let (group, dividerFrame) = group(of: items),
-              let statusAreaMinX = await statusAreaMinX(around: dividerFrame),
-              visibility.alwaysShowsWhereItFits, visibility.activity != .pressing
-        else { return }
-        if measuringGroup, !visibility.isShown { recordHiddenGroupWidth(of: group) }
-        guard isGroupMeasured else { return }
-        var width = hiddenGroupWidth
-        if measuringGroup, visibility.isShown { width = max(width, Divider.groupWidth(group)) }
-        let fits = Divider.groupFits(width: width, dividerFrame: dividerFrame, statusAreaMinX: statusAreaMinX)
-        guard fits != visibility.fits else { return }
-        Self.log.info("group of width \(width) \(fits ? "fits again; showing it" : "no longer fits; hiding it", privacy: .public)")
-        visibility.fits = fits
-        applyVisibility()
-    }
-
-    /// Records the width of the hidden group, unless the menu bar is still being laid out
-    /// again and the measurement would be wrong; see `Divider.isGroupPushedOff`.
-    private func recordHiddenGroupWidth(of group: [MenuBarItem]) {
-        guard Divider.isGroupPushedOff(group, displays: WindowServer.displayBounds()) else {
-            Self.log.info("group not yet pushed off the displays; measuring it again later")
+    private func updateRefreshTimers() {
+        let shouldRunTimers = spacerLifecycle.placedGeneration != nil && AccessibilityClient.isTrusted
+        guard shouldRunTimers else {
+            boundaryTimer?.invalidate()
+            boundaryTimer = nil
+            boundaryTimerInterval = 0
+            inventoryTimer?.invalidate()
+            inventoryTimer = nil
             return
         }
-        hiddenGroupWidth = Divider.groupWidth(group)
-        isGroupMeasured = true
+        let interval = visibility.alwaysShowsWhereItFits ? Self.alwaysShowBoundaryInterval : Self.idleBoundaryInterval
+        if boundaryTimerInterval != interval || boundaryTimer == nil {
+            boundaryTimer?.invalidate()
+            boundaryTimerInterval = interval
+            let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    let needsInventory = (self.visibility.isHidden || self.visibility.isShownWhereItFits)
+                        && !self.fit.hasValidInventory(
+                            for: MenuBarFit.Context(
+                                displayIdentifier: nil,
+                                frontApplicationProcessIdentifier: nil,
+                                spacerGeneration: self.spacerLifecycle.placedGeneration
+                            ),
+                            at: ProcessInfo.processInfo.systemUptime
+                        )
+                    self.scheduleRefresh(needsInventory ? [.boundary, .inventory] : .boundary)
+                }
+            }
+            timer.tolerance = interval * 0.2
+            boundaryTimer = timer
+        }
+        if inventoryTimer == nil {
+            let timer = Timer.scheduledTimer(withTimeInterval: Self.idleInventoryInterval, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.visibility.isHidden || self.visibility.isShownWhereItFits else { return }
+                    self.scheduleRefresh(.inventory)
+                }
+            }
+            timer.tolerance = 5
+            inventoryTimer = timer
+        }
     }
 
-    /// The left bound of the status area on the display that holds the divider's frame,
-    /// or nil when no display holds it or the front application's menus cannot be read.
-    private func statusAreaMinX(around dividerFrame: CGRect) async -> CGFloat? {
-        let center = CGPoint(x: dividerFrame.midX, y: dividerFrame.midY)
-        guard let screen = NSScreen.screens.first(where: { CGDisplayBounds($0.displayIdentifier).contains(center) }) else {
-            return nil
+    private func invalidateBoundaryAndRefresh(delay: Duration?) {
+        boundaryRevision &+= 1
+        fit.invalidateBoundary()
+        guard let delay else {
+            scheduleRefresh(.boundary)
+            return
         }
-        guard let menuTitleFrames = await AccessibilityClient.frontMenuTitleFrames() else {
-            Self.log.error("the front application's menus could not be read; the fit is unknown")
-            return nil
+        delayedBoundaryRefreshTask?.cancel()
+        delayedBoundaryRefreshTask = Task { [weak self] in
+            do { try await Task.sleep(for: delay) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            self.delayedBoundaryRefreshTask = nil
+            self.scheduleRefresh(.boundary)
         }
-        return Divider.statusAreaMinX(
+    }
+
+    private func invalidateInventoryAndRefresh(delay: Duration?) {
+        inventoryRevision &+= 1
+        fit.invalidateInventory()
+        settleRetryTask?.cancel()
+        settleRetryTask = nil
+        settleRetryAttempts = 0
+        guard let delay else {
+            scheduleRefresh(.inventory)
+            return
+        }
+        scheduleInventoryRefresh(after: delay, includeBoundary: false)
+    }
+
+    private func invalidateAllAndRefresh(delay: Duration?) {
+        invalidateAllFit()
+        guard let delay else {
+            scheduleRefresh([.boundary, .inventory])
+            return
+        }
+        scheduleInventoryRefresh(after: delay, includeBoundary: true)
+    }
+
+    private func invalidateAllFit() {
+        boundaryRevision &+= 1
+        inventoryRevision &+= 1
+        fit.invalidateAll()
+        delayedBoundaryRefreshTask?.cancel()
+        delayedBoundaryRefreshTask = nil
+        delayedInventoryRefreshTask?.cancel()
+        delayedInventoryRefreshTask = nil
+        settleRetryTask?.cancel()
+        settleRetryTask = nil
+        settleRetryAttempts = 0
+    }
+
+    private func scheduleInventoryRefresh(after delay: Duration, includeBoundary: Bool) {
+        delayedInventoryRefreshTask?.cancel()
+        delayedInventoryRefreshTask = Task { [weak self] in
+            do { try await Task.sleep(for: delay) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            self.delayedInventoryRefreshTask = nil
+            self.scheduleRefresh(includeBoundary ? [.boundary, .inventory] : .inventory)
+        }
+    }
+
+    private func scheduleSettleRetryIfNeeded(for generation: SpacerLifecycle.Generation) {
+        guard settleRetryAttempts < Self.settleRetryLimit else { return }
+        settleRetryAttempts += 1
+        settleRetryTask?.cancel()
+        settleRetryTask = Task { [weak self] in
+            do { try await Task.sleep(for: Self.settleRetryDelay) } catch { return }
+            guard let self,
+                  !Task.isCancelled,
+                  self.spacerLifecycle.placedGeneration == generation,
+                  self.visibility.isHidden
+            else { return }
+            self.settleRetryTask = nil
+            self.scheduleRefresh([.boundary, .inventory])
+        }
+    }
+
+    private func scheduleRefresh(_ kinds: RefreshKinds) {
+        guard AccessibilityClient.isTrusted, spacerLifecycle.placedGeneration != nil else { return }
+        pendingRefreshKinds.formUnion(kinds)
+        guard refreshTask == nil else { return }
+        refreshTask = Task { [weak self] in
+            await self?.drainRefreshQueue()
+        }
+    }
+
+    private func drainRefreshQueue() async {
+        defer { refreshTask = nil }
+        while !pendingRefreshKinds.isEmpty, !Task.isCancelled {
+            guard AccessibilityClient.isTrusted, let generation = spacerLifecycle.placedGeneration else {
+                pendingRefreshKinds = []
+                return
+            }
+            let kinds = pendingRefreshKinds
+            pendingRefreshKinds = []
+            await performRefresh(kinds, generation: generation)
+        }
+    }
+
+    private func performRefresh(_ kinds: RefreshKinds, generation: SpacerLifecycle.Generation) async {
+        let needsInventory = kinds.contains(.inventory)
+        let needsBoundary = kinds.contains(.boundary)
+        guard needsInventory || needsBoundary else { return }
+
+        let ownIdentifier = ProcessInfo.processInfo.processIdentifier
+        let startInventoryRevision = inventoryRevision
+        let startBoundaryRevision = boundaryRevision
+        let startWasHidden = visibility.isHidden
+        let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+
+        async let itemsTask = AccessibilityClient.items(
+            ofProcess: needsInventory ? nil : ownIdentifier,
+            includeDescriptions: false
+        )
+        async let menuTitlesTask: [CGRect]? = {
+            guard needsBoundary, let frontPID else { return nil }
+            return await AccessibilityClient.frontMenuTitleFrames(ofProcess: frontPID)
+        }()
+
+        let items = await itemsTask
+        let menuTitleFrames = await menuTitlesTask
+
+        guard
+            !Task.isCancelled,
+            AccessibilityClient.isTrusted,
+            spacerLifecycle.placedGeneration == generation
+        else { return }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let parsedGroup = group(of: items)
+
+        if needsInventory, let (group, _) = parsedGroup {
+            recordInventoryIfCurrent(
+                group: group,
+                generation: generation,
+                startInventoryRevision: startInventoryRevision,
+                startWasHidden: startWasHidden,
+                scheduleRetryOnMidMove: true,
+                at: now
+            )
+        }
+
+        if needsBoundary {
+            if let (_, dividerFrame) = parsedGroup {
+                recordBoundaryIfCurrent(
+                    dividerFrame: dividerFrame,
+                    menuTitleFrames: menuTitleFrames,
+                    frontPID: frontPID,
+                    generation: generation,
+                    startBoundaryRevision: startBoundaryRevision,
+                    at: now
+                )
+            } else if boundaryRevision == startBoundaryRevision,
+                      frontPID == NSWorkspace.shared.frontmostApplication?.processIdentifier {
+                fit.invalidateBoundary()
+            }
+        }
+
+        if visibility.alwaysShowsWhereItFits, visibility.activity != .pressing {
+            let activeDisplay = parsedGroup.flatMap { screen(containingAXFrame: $0.dividerFrame)?.displayIdentifier }
+            let context = MenuBarFit.Context(
+                displayIdentifier: activeDisplay,
+                frontApplicationProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                spacerGeneration: generation
+            )
+            switch fit.decision(for: context, at: now) {
+            case .fits:
+                if !visibility.fits {
+                    Self.log.info("group fits again; showing it")
+                    visibility.fits = true
+                    applyVisibility()
+                }
+            case .doesNotFit:
+                if visibility.fits {
+                    Self.log.info("group no longer fits; hiding it")
+                    visibility.fits = false
+                    applyVisibility()
+                }
+            case .unknown:
+                break
+            }
+        }
+    }
+
+    private func recordInventoryIfCurrent(
+        group: [MenuBarItem],
+        generation: SpacerLifecycle.Generation,
+        startInventoryRevision: UInt64,
+        startWasHidden: Bool,
+        scheduleRetryOnMidMove: Bool,
+        at now: TimeInterval
+    ) {
+        guard
+            inventoryRevision == startInventoryRevision,
+            visibility.isHidden == startWasHidden
+        else { return }
+        if startWasHidden {
+            if fit.recordHiddenGroup(
+                group,
+                displays: WindowServer.displayBounds(),
+                spacerGeneration: generation,
+                at: now
+            ) {
+                settleRetryTask?.cancel()
+                settleRetryTask = nil
+                settleRetryAttempts = 0
+            } else if scheduleRetryOnMidMove {
+                Self.log.info("group not yet pushed off the displays; measuring it again later")
+                scheduleSettleRetryIfNeeded(for: generation)
+            }
+        } else {
+            fit.recordShownGroup(group, spacerGeneration: generation, at: now)
+        }
+    }
+
+    private func recordBoundaryIfCurrent(
+        dividerFrame: CGRect,
+        menuTitleFrames: [CGRect]?,
+        frontPID: Int32?,
+        generation: SpacerLifecycle.Generation,
+        startBoundaryRevision: UInt64,
+        at now: TimeInterval
+    ) {
+        guard boundaryRevision == startBoundaryRevision else { return }
+        guard
+            let frontPID,
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == frontPID,
+            let screen = screen(containingAXFrame: dividerFrame),
+            let menuTitleFrames
+        else {
+            if frontPID == NSWorkspace.shared.frontmostApplication?.processIdentifier {
+                fit.invalidateBoundary()
+            }
+            return
+        }
+        fit.recordBoundary(
+            displayIdentifier: screen.displayIdentifier,
+            frontApplicationProcessIdentifier: frontPID,
+            dividerFrame: dividerFrame,
+            statusAreaMinX: statusAreaMinX(on: screen, menuTitleFrames: menuTitleFrames),
+            spacerGeneration: generation,
+            at: now
+        )
+    }
+
+    private func currentClickContext() -> MenuBarFit.Context {
+        MenuBarFit.Context(
+            displayIdentifier: currentDisplayIdentifier(),
+            frontApplicationProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            spacerGeneration: spacerLifecycle.placedGeneration
+        )
+    }
+
+    private func currentDisplayIdentifier() -> CGDirectDisplayID? {
+        let pointer = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(pointer) }
+            ?? NSScreen.screens.first { $0.frame.insetBy(dx: -1, dy: -1).contains(pointer) }
+            ?? dividerItem?.button?.window?.screen
+        return screen?.displayIdentifier
+    }
+
+    private func screen(containingAXFrame frame: CGRect) -> NSScreen? {
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        return NSScreen.screens.first { CGDisplayBounds($0.displayIdentifier).contains(center) }
+    }
+
+    private func statusAreaMinX(on screen: NSScreen, menuTitleFrames: [CGRect]) -> CGFloat {
+        Divider.statusAreaMinX(
             displayFrame: CGDisplayBounds(screen.displayIdentifier),
             menuTitleFrames: menuTitleFrames,
             unobscuredTopRightWidth: screen.auxiliaryTopRightArea?.width
         )
+    }
+
+    private static func formattedMilliseconds(_ duration: Duration) -> String {
+        let milliseconds = Double(duration.components.seconds) * 1_000
+            + Double(duration.components.attoseconds) / 1e15
+        return String(format: "%.2f", milliseconds)
     }
 
     // MARK: Group panel
@@ -496,15 +1004,32 @@ final class DividerController: NSObject {
     /// Opens the panel once the group's icons are listed, unless the panel is toggled
     /// again meanwhile.
     private func openPanel() {
+        cancelPendingClick()
         panelOpenTask?.cancel()
         guard AccessibilityClient.isTrusted else {
             panel.show(state: .needsAccessibility, at: dividerAnchor())
             return
         }
+        let startInventoryRevision = inventoryRevision
+        let startWasHidden = visibility.isHidden
+        let generation = spacerLifecycle.placedGeneration
         panelOpenTask = Task {
             let items = await AccessibilityClient.items()
             guard !Task.isCancelled else { return }
             panelOpenTask = nil
+            if let generation,
+               spacerLifecycle.placedGeneration == generation,
+               startWasHidden,
+               let (group, _) = group(of: items) {
+                recordInventoryIfCurrent(
+                    group: group,
+                    generation: generation,
+                    startInventoryRevision: startInventoryRevision,
+                    startWasHidden: startWasHidden,
+                    scheduleRetryOnMidMove: false,
+                    at: ProcessInfo.processInfo.systemUptime
+                )
+            }
             showPanel(listing: items)
         }
     }
@@ -521,15 +1046,19 @@ final class DividerController: NSObject {
         panel.show(state: .entries(entries, isShownInMenuBar: visibility.isShown), at: dividerAnchor())
     }
 
+    private func dividerFrame(in items: [AccessibleItem]) -> CGRect? {
+        let ownIdentifier = ProcessInfo.processInfo.processIdentifier
+        return items
+            .filter { $0.item.processIdentifier == ownIdentifier && $0.item.isLaidOut }
+            .max(by: { $0.item.frame.maxX < $1.item.frame.maxX })?.item.frame
+    }
+
     /// The group's icons, left to right, and the divider's frame, as the Accessibility
     /// API reports them for the display whose menu bar is active.
     private func group(of items: [AccessibleItem]) -> (group: [MenuBarItem], dividerFrame: CGRect)? {
         let ownIdentifier = ProcessInfo.processInfo.processIdentifier
         // Of this application's own items, the divider is the rightmost laid-out one.
-        guard let dividerFrame = items
-            .filter({ $0.item.processIdentifier == ownIdentifier && $0.item.isLaidOut })
-            .max(by: { $0.item.frame.maxX < $1.item.frame.maxX })?.item.frame
-        else { return nil }
+        guard let dividerFrame = dividerFrame(in: items) else { return nil }
         let excluded = Set([ownIdentifier] + spacerProcesses.values.map(\.processIdentifier))
         let group = Divider.groupItems(items.map(\.item), dividerFrame: dividerFrame, excludingProcesses: excluded)
         return (group, dividerFrame)
@@ -604,10 +1133,12 @@ final class DividerController: NSObject {
         guard case .arrangementHelp = state, let ticket = visibility.current, ticket.activity == .arranging else {
             return
         }
+        invalidateInventoryAndRefresh(delay: Self.settleDelay)
         finish(ticket)
     }
 
     private func closePanel() {
+        cancelPendingClick()
         panelOpenTask?.cancel()
         panelOpenTask = nil
         panel.close()
@@ -631,23 +1162,23 @@ final class DividerController: NSObject {
     }
 
     private func reveal(andPress target: AccessibleItem) async {
-        let frame = await settledFrame(of: target)
+        let settled = await settledTarget(for: target)
         // A later choice took over while this one waited; it must not press as well.
         guard !Task.isCancelled else { return }
-        guard let frame else {
+        guard let settled else {
             NSSound.beep()
             return
         }
-        let pressed = AccessibilityClient.press(target.element)
-        Self.log.info("pressed \(target.item.name, privacy: .public): \(pressed)")
+        let pressed = await AccessibilityClient.press(settled.element)
+        Self.log.info("pressed \(settled.item.name, privacy: .public): \(pressed)")
         var session = RevealSession(startTime: ProcessInfo.processInfo.systemUptime)
         while true {
             do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
             let windows = WindowServer.onScreenWindows()
             let isOpen = MenuDetection.isMenuOpen(
                 windows: windows,
-                ownerProcessIdentifier: target.item.processIdentifier,
-                itemFrame: frame
+                ownerProcessIdentifier: settled.item.processIdentifier,
+                itemFrame: settled.item.frame
             )
             let previousPhase = session.phase
             let phase = session.observe(isMenuOpen: isOpen, time: ProcessInfo.processInfo.systemUptime)
@@ -656,17 +1187,24 @@ final class DividerController: NSObject {
         }
     }
 
-    /// Waits until the icon lies on a display and has stopped moving, and returns its
-    /// frame; nil if it does not settle or the wait is cancelled.
-    private func settledFrame(of target: AccessibleItem) async -> CGRect? {
+    /// Waits until the icon lies on a display and has stopped moving, returning a freshly
+    /// resolved target so neither its frame nor its AX element is stale.
+    private func settledTarget(for target: AccessibleItem) async -> AccessibleItem? {
         var previous: CGRect?
         for _ in 0..<40 {
             do { try await Task.sleep(for: .milliseconds(50)) } catch { return nil }
-            guard let frame = AccessibilityClient.frame(of: target.element) else { continue }
-            if frame == previous, MenuDetection.isWithinDisplay(frame, displays: WindowServer.displayBounds()) {
-                return frame
+            let processItems = await AccessibilityClient.items(
+                ofProcess: target.item.processIdentifier,
+                includeDescriptions: false
+            )
+            guard let current = processItems.first(where: { $0.item.isSameItem(as: target.item) }) else {
+                continue
             }
-            previous = frame
+            if current.item.frame == previous,
+               MenuDetection.isWithinDisplay(current.item.frame, displays: WindowServer.displayBounds()) {
+                return current
+            }
+            previous = current.item.frame
         }
         return nil
     }
@@ -674,6 +1212,7 @@ final class DividerController: NSObject {
     // MARK: Context menu
 
     private func showContextMenu() {
+        cancelPendingClick()
         closePanel()
         guard let button = dividerItem?.button else { return }
         let menu = NSMenu()
@@ -864,6 +1403,7 @@ final class DividerController: NSObject {
                 guard !self.defaults.bool(forKey: Self.positionSeededKey) else {
                     Self.log.info("Accessibility permission granted; hiding the group")
                     self.applyVisibility()
+                    self.updateRefreshTimers()
                     return
                 }
                 self.defaults.removeObject(forKey: Self.preferredPositionKey(Self.dividerAutosaveName))

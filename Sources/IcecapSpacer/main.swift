@@ -3,6 +3,9 @@
 // exchanges with icecap.
 import AppKit
 import IcecapCore
+import OSLog
+
+let log = Logger(subsystem: "com.memorysynchub.icecap", category: "spacer-helper")
 
 let arguments = CommandLine.arguments
 guard arguments.count == 2, let preferredPosition = Double(arguments[1]) else {
@@ -42,7 +45,12 @@ var lines = LineBuffer()
             FileHandle.standardError.write(Data("unknown command: \(line)\n".utf8))
             exit(65)
         }
+        let started = ContinuousClock.now
         spacer.length = command.spacerLength
+        let elapsed = started.duration(to: .now)
+        let milliseconds = Double(elapsed.components.seconds) * 1_000
+            + Double(elapsed.components.attoseconds) / 1e15
+        log.debug("applied \(command.rawValue, privacy: .public) in \(milliseconds, privacy: .public) ms")
     }
 }
 

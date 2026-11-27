@@ -85,22 +85,25 @@ exits unexpectedly, does not answer `placed` within five seconds, or widens its 
 and pushes the chevron off the display has failed, and icecap starts another. The helper
 ends when its input closes, so it ends with icecap however icecap ends.
 
-On a click, icecap measures the group from the icons' Accessibility frames, which keep
-their widths and spacing while pushed off the display. The group fits if it would end at
-least 8 points right of the front application's last menu title and, on a display with a
-camera housing, right of the housing (`NSScreen.auxiliaryTopRightArea`). A click that
-finds room starts a peek. Five times a second icecap checks where the pointer is, and
-the peek ends once the pointer has stayed out of the menu bar for a second (three, if
-the peek began away from it, as from the panel) while no menu is open. A menu counts
-as open while any pop-up menu is on screen, or a raised window of one of the group's
-applications begins just below the top of a display, as a popover does.
+icecap pre-measures the hidden group and the active status area boundary in the
+background — refreshing on application, display, Space, wake, and arrangement changes,
+or on demand when stale — from the icons' Accessibility frames, which keep their widths
+and spacing while pushed off the display. The group fits if it would end at least 8 points
+right of the front application's last menu title and, on a display with a camera housing,
+right of the housing (`NSScreen.auxiliaryTopRightArea`). Because the fit is kept current
+ahead of time, clicking the chevron shrinks the spacer immediately when the group fits
+and starts a peek, falling back to the panel when it does not or cannot be read. Five
+times a second icecap checks where the pointer is, and the peek ends once the pointer has
+stayed out of the menu bar for a second (three, if the peek began away from it, as from
+the panel) while no menu is open. A menu counts as open while any pop-up menu is on
+screen, or a raised window of one of the group's applications begins just below the top of
+a display, as a popover does.
 
-With Always Show Where It Fits chosen, icecap checks the fit again when another
-application comes to the front, when one starts or ends, when the displays change, and
-every second, which catches the active menu bar moving to another display. It hides the
-group where it no longer fits and shows it again where it does. The group's width is
-measured only while it is hidden, because the icons that do not fit on a narrow display
-are not laid out.
+With Always Show Where It Fits chosen, icecap checks the status area boundary more
+frequently alongside application, display, Space, and wake changes, hiding the group where
+it no longer fits and showing it again where it does. The group's width is measured only
+while it is hidden, because the icons that do not fit on a narrow display are not laid
+out.
 
 The panel lists the group's icons from the Accessibility API (`AXExtrasMenuBar`), by
 application icon and name; icons of one application that share a name are numbered

@@ -70,13 +70,17 @@ final class SpacerProcess {
         }
     }
 
-    /// Tells the helper to hide or show the icons left of the spacer.
-    func send(_ command: SpacerHelper.Command) {
+    /// Tells the helper to hide or show the icons left of the spacer, returning whether the
+    /// command was written to the helper's pipe.
+    @discardableResult
+    func send(_ command: SpacerHelper.Command) -> Bool {
         do {
             try input.fileHandleForWriting.write(contentsOf: SpacerHelper.line(command))
+            return true
         } catch {
             // The helper has ended; `onExit` reports that.
             Self.log.error("could not send \(command.rawValue, privacy: .public) to the spacer: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 
