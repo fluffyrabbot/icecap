@@ -69,6 +69,8 @@ final class DividerController: NSObject {
     private var opensArrangementHelpWhenPlaced = false
     /// The processes that own the group's icons, as last listed in the panel.
     private var listedGroupProcesses: Set<Int32> = []
+    /// Cached application icons keyed by process identifier.
+    private var applicationIcons: [Int32: NSImage] = [:]
     /// Cached hidden-group inventory and active-display status area boundary.
     private var fit = MenuBarFit()
     private var pendingClickTracker = PendingClickTracker()
@@ -91,6 +93,8 @@ final class DividerController: NSObject {
     /// The listing of the group's icons under way for the panel, which a second request
     /// to toggle the panel cancels.
     private var panelOpenTask: Task<Void, Never>?
+    /// A silent background refresh while an already-warm panel is visible.
+    private var panelRefreshTask: Task<Void, Never>?
     static let panelShortcutKey = "PanelShortcut"
     private var hotKey: HotKey?
     /// Why the chosen shortcut could not be registered, when it could not.
@@ -474,7 +478,7 @@ final class DividerController: NSObject {
             let elapsed = clickStarted.duration(to: .now)
             Self.log.info("warm chevron expand in \(Self.formattedMilliseconds(elapsed), privacy: .public) ms")
         case .openPanel:
-            openPanel()
+            openPanel(clickStarted: clickStarted)
         case .refreshBoundaryThenRoute:
             routeClickAfterBoundaryRefresh(context: context, clickStarted: clickStarted)
         case .refreshAllThenRoute:
@@ -498,6 +502,7 @@ final class DividerController: NSObject {
         let startBoundaryRevision = boundaryRevision
         let frontPID = context.frontApplicationProcessIdentifier
         let generation = context.spacerGeneration
+        let anchor = dividerAnchor()
         pendingClickTask = Task { [weak self] in
             async let ownItemsTask = AccessibilityClient.items(ofProcess: ownIdentifier, includeDescriptions: false)
             async let menuTitlesTask: [CGRect]? = {
@@ -517,7 +522,11 @@ final class DividerController: NSObject {
             else { return }
 
             let now = ProcessInfo.processInfo.systemUptime
-            let latestContext = self.currentClickContext()
+            let decisionContext = MenuBarFit.Context(
+                displayIdentifier: context.displayIdentifier,
+                frontApplicationProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                spacerGeneration: self.spacerLifecycle.placedGeneration
+            )
             if let generation,
                self.spacerLifecycle.placedGeneration == generation,
                let dividerFrame = self.dividerFrame(in: ownItems) {
@@ -534,13 +543,17 @@ final class DividerController: NSObject {
                 self.fit.invalidateBoundary()
             }
 
-            switch self.fit.decision(for: latestContext, at: now) {
+            switch self.fit.decision(for: decisionContext, at: now) {
             case .fits(let groupProcesses):
                 self.startPeek(groupProcesses: groupProcesses)
                 let elapsed = clickStarted.duration(to: .now)
                 Self.log.info("boundary-refreshed chevron expand in \(Self.formattedMilliseconds(elapsed), privacy: .public) ms")
             case .doesNotFit, .unknown:
-                self.openPanel()
+                self.openPanel(
+                    anchor: anchor,
+                    clickStarted: clickStarted,
+                    warmLogPrefix: "boundary-refreshed panel open"
+                )
             }
         }
     }
@@ -556,6 +569,7 @@ final class DividerController: NSObject {
         let startWasHidden = visibility.isHidden
         let frontPID = context.frontApplicationProcessIdentifier
         let generation = context.spacerGeneration
+        let anchor = dividerAnchor()
         pendingClickTask = Task { [weak self] in
             async let itemsTask = AccessibilityClient.items(includeDescriptions: true)
             async let menuTitlesTask: [CGRect]? = {
@@ -575,7 +589,11 @@ final class DividerController: NSObject {
             else { return }
 
             let now = ProcessInfo.processInfo.systemUptime
-            let latestContext = self.currentClickContext()
+            let decisionContext = MenuBarFit.Context(
+                displayIdentifier: context.displayIdentifier,
+                frontApplicationProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                spacerGeneration: self.spacerLifecycle.placedGeneration
+            )
             if let (group, dividerFrame) = self.group(of: items) {
                 if let generation, self.spacerLifecycle.placedGeneration == generation {
                     self.recordInventoryIfCurrent(
@@ -610,13 +628,15 @@ final class DividerController: NSObject {
                 self.fit.invalidateBoundary()
             }
 
-            if case .fits(let groupProcesses) = self.fit.decision(for: latestContext, at: now) {
+            if case .fits(let groupProcesses) = self.fit.decision(for: decisionContext, at: now) {
                 self.startPeek(groupProcesses: groupProcesses)
                 let elapsed = clickStarted.duration(to: .now)
                 Self.log.info("cold chevron expand in \(Self.formattedMilliseconds(elapsed), privacy: .public) ms")
                 return
             }
-            self.showPanel(listing: items)
+            self.showPanel(listing: items, anchor: anchor)
+            let elapsed = clickStarted.duration(to: .now)
+            Self.log.info("cold panel open in \(Self.formattedMilliseconds(elapsed), privacy: .public) ms")
         }
     }
 
@@ -644,6 +664,7 @@ final class DividerController: NSObject {
             (workspace, NSWorkspace.didTerminateApplicationNotification, { [weak self] processIdentifier, policy in
                 guard let self else { return }
                 if let processIdentifier {
+                    self.applicationIcons[processIdentifier] = nil
                     let owned = self.fit.ownsGroupProcess(processIdentifier)
                     if !owned && policy == .prohibited { return }
                 }
@@ -831,7 +852,7 @@ final class DividerController: NSObject {
 
         async let itemsTask = AccessibilityClient.items(
             ofProcess: needsInventory ? nil : ownIdentifier,
-            includeDescriptions: false
+            includeDescriptions: needsInventory
         )
         async let menuTitlesTask: [CGRect]? = {
             guard needsBoundary, let frontPID else { return nil }
@@ -925,6 +946,7 @@ final class DividerController: NSObject {
                 settleRetryTask?.cancel()
                 settleRetryTask = nil
                 settleRetryAttempts = 0
+                prewarmApplicationIcons(for: fit.inventory?.processIdentifiers ?? [])
                 Self.log.debug("measured hidden group: \(group.count) icons, width \(Divider.groupWidth(group), privacy: .public)")
             } else if scheduleRetryOnMidMove {
                 Self.log.info("group not yet pushed off the displays; measuring it again later")
@@ -932,6 +954,7 @@ final class DividerController: NSObject {
             }
         } else {
             fit.recordShownGroup(group, spacerGeneration: generation, at: now)
+            prewarmApplicationIcons(for: fit.inventory?.processIdentifiers ?? [])
         }
     }
 
@@ -1004,13 +1027,31 @@ final class DividerController: NSObject {
 
     // MARK: Group panel
 
-    /// Opens the panel once the group's icons are listed, unless the panel is toggled
-    /// again meanwhile.
-    private func openPanel() {
+    /// Opens the panel immediately from cached inventory when warm and reconciles in the
+    /// background, or loads the group's icons asynchronously when cold.
+    private func openPanel(
+        anchor: NSPoint? = nil,
+        clickStarted: ContinuousClock.Instant? = nil,
+        warmLogPrefix: String = "warm panel open"
+    ) {
+        let started = clickStarted ?? ContinuousClock.now
         cancelPendingClick()
         panelOpenTask?.cancel()
+        panelOpenTask = nil
+        panelRefreshTask?.cancel()
+        panelRefreshTask = nil
+        let targetAnchor = anchor ?? dividerAnchor()
         guard AccessibilityClient.isTrusted else {
-            panel.show(state: .needsAccessibility, at: dividerAnchor())
+            panel.show(state: .needsAccessibility, at: targetAnchor)
+            return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        let context = currentClickContext()
+        if let cachedGroup = fit.cachedGroupItems(for: context, at: now) {
+            showPanel(group: cachedGroup, anchor: targetAnchor)
+            let elapsed = started.duration(to: .now)
+            Self.log.info("\(warmLogPrefix, privacy: .public) in \(Self.formattedMilliseconds(elapsed), privacy: .public) ms")
+            refreshPanelInBackground()
             return
         }
         let startInventoryRevision = inventoryRevision
@@ -1033,20 +1074,53 @@ final class DividerController: NSObject {
                     at: ProcessInfo.processInfo.systemUptime
                 )
             }
-            showPanel(listing: items)
+            showPanel(listing: items, anchor: targetAnchor)
+            let elapsed = started.duration(to: .now)
+            Self.log.info("cold panel open in \(Self.formattedMilliseconds(elapsed), privacy: .public) ms")
         }
     }
 
-    private func showPanel(listing items: [AccessibleItem]) {
+    private func refreshPanelInBackground() {
+        let startInventoryRevision = inventoryRevision
+        let startWasHidden = visibility.isHidden
+        let generation = spacerLifecycle.placedGeneration
+        panelRefreshTask = Task { [weak self] in
+            let items = await AccessibilityClient.items(includeDescriptions: true)
+            guard let self, !Task.isCancelled else { return }
+            self.panelRefreshTask = nil
+            guard let (group, _) = self.group(of: items) else { return }
+            if let generation, self.spacerLifecycle.placedGeneration == generation {
+                self.recordInventoryIfCurrent(
+                    group: group,
+                    generation: generation,
+                    startInventoryRevision: startInventoryRevision,
+                    startWasHidden: startWasHidden,
+                    scheduleRetryOnMidMove: false,
+                    at: ProcessInfo.processInfo.systemUptime
+                )
+            }
+            guard self.panel.isVisible else { return }
+            let entries = self.groupEntries(of: group)
+            self.listedGroupProcesses = Set(entries.map(\.item.processIdentifier))
+            self.panel.updateEntries(entries, isShownInMenuBar: self.visibility.isShown)
+        }
+    }
+
+    private func showPanel(listing items: [AccessibleItem], anchor: NSPoint? = nil) {
+        let targetAnchor = anchor ?? dividerAnchor()
         guard let (group, _) = group(of: items) else {
             Self.log.error("the divider could not be read; the group is unknown")
             listedGroupProcesses = []
-            panel.show(state: .unreadable, at: dividerAnchor())
+            panel.show(state: .unreadable, at: targetAnchor)
             return
         }
-        let entries = groupEntries(of: group, in: items)
-        listedGroupProcesses = Set(entries.map(\.accessible.item.processIdentifier))
-        panel.show(state: .entries(entries, isShownInMenuBar: visibility.isShown), at: dividerAnchor())
+        showPanel(group: group, anchor: targetAnchor)
+    }
+
+    private func showPanel(group: [MenuBarItem], anchor: NSPoint? = nil) {
+        let entries = groupEntries(of: group)
+        listedGroupProcesses = Set(entries.map(\.item.processIdentifier))
+        panel.show(state: .entries(entries, isShownInMenuBar: visibility.isShown), at: anchor ?? dividerAnchor())
     }
 
     private func dividerFrame(in items: [AccessibleItem]) -> CGRect? {
@@ -1067,11 +1141,30 @@ final class DividerController: NSObject {
         return (group, dividerFrame)
     }
 
-    private func groupEntries(of group: [MenuBarItem], in items: [AccessibleItem]) -> [GroupPanel.Entry] {
-        zip(group, MenuBarItem.listedNames(of: group)).compactMap { member, title in
-            guard let accessible = items.first(where: { $0.item.isSameItem(as: member) }) else { return nil }
-            let icon = NSRunningApplication(processIdentifier: member.processIdentifier)?.icon
-            return GroupPanel.Entry(accessible: accessible, title: title, icon: icon)
+    private func groupEntries(of group: [MenuBarItem]) -> [GroupPanel.Entry] {
+        zip(group, MenuBarItem.listedNames(of: group)).map { member, title in
+            GroupPanel.Entry(
+                item: member,
+                title: title,
+                icon: applicationIcon(for: member.processIdentifier)
+            )
+        }
+    }
+
+    private func applicationIcon(for processIdentifier: Int32) -> NSImage? {
+        if let cached = applicationIcons[processIdentifier] {
+            return cached
+        }
+        guard let icon = NSRunningApplication(processIdentifier: processIdentifier)?.icon else {
+            return nil
+        }
+        applicationIcons[processIdentifier] = icon
+        return icon
+    }
+
+    private func prewarmApplicationIcons(for processIdentifiers: Set<Int32>) {
+        for processIdentifier in processIdentifiers where applicationIcons[processIdentifier] == nil {
+            _ = applicationIcon(for: processIdentifier)
         }
     }
 
@@ -1133,6 +1226,8 @@ final class DividerController: NSObject {
     /// The panel closed. Closing the arrangement help, by Done or a click on the chevron,
     /// ends arranging.
     private func panelClosed(_ state: GroupPanel.State) {
+        panelRefreshTask?.cancel()
+        panelRefreshTask = nil
         guard case .arrangementHelp = state, let ticket = visibility.current, ticket.activity == .arranging else {
             return
         }
@@ -1144,6 +1239,8 @@ final class DividerController: NSObject {
         cancelPendingClick()
         panelOpenTask?.cancel()
         panelOpenTask = nil
+        panelRefreshTask?.cancel()
+        panelRefreshTask = nil
         panel.close()
     }
 
@@ -1159,12 +1256,12 @@ final class DividerController: NSObject {
         panel.close()
         let ticket = begin(.pressing)
         activityTask = Task { [weak self] in
-            await self?.reveal(andPress: entry.accessible)
+            await self?.reveal(andPress: entry.item)
             self?.finish(ticket)
         }
     }
 
-    private func reveal(andPress target: AccessibleItem) async {
+    private func reveal(andPress target: MenuBarItem) async {
         let settled = await settledTarget(for: target)
         // A later choice took over while this one waited; it must not press as well.
         guard !Task.isCancelled else { return }
@@ -1192,15 +1289,15 @@ final class DividerController: NSObject {
 
     /// Waits until the icon lies on a display and has stopped moving, returning a freshly
     /// resolved target so neither its frame nor its AX element is stale.
-    private func settledTarget(for target: AccessibleItem) async -> AccessibleItem? {
+    private func settledTarget(for target: MenuBarItem) async -> AccessibleItem? {
         var previous: CGRect?
-        for _ in 0..<40 {
-            do { try await Task.sleep(for: .milliseconds(50)) } catch { return nil }
+        for _ in 0..<100 {
+            do { try await Task.sleep(for: .milliseconds(20)) } catch { return nil }
             let processItems = await AccessibilityClient.items(
-                ofProcess: target.item.processIdentifier,
+                ofProcess: target.processIdentifier,
                 includeDescriptions: false
             )
-            guard let current = processItems.first(where: { $0.item.isSameItem(as: target.item) }) else {
+            guard let current = processItems.first(where: { $0.item.isSameItem(as: target) }) else {
                 continue
             }
             if current.item.frame == previous,

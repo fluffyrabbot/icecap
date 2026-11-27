@@ -6,11 +6,15 @@ import IcecapCore
 /// move through it with the arrow keys, choose with Return and close it with Escape.
 @MainActor
 final class GroupPanel: NSObject, NSSearchFieldDelegate {
-    struct Entry {
-        let accessible: AccessibleItem
+    struct Entry: Equatable {
+        let item: MenuBarItem
         /// The icon's name as listed, numbered where several icons share it.
         let title: String
         let icon: NSImage?
+
+        static func == (lhs: Entry, rhs: Entry) -> Bool {
+            lhs.item.isSameItem(as: rhs.item) && lhs.title == rhs.title
+        }
     }
 
     enum State {
@@ -94,6 +98,21 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
         }
     }
 
+    /// Updates the displayed entries in place while the panel is visible, preserving any
+    /// active search filter and keyboard focus unless switching between empty and searchable.
+    func updateEntries(_ entries: [Entry], isShownInMenuBar: Bool) {
+        guard isVisible, case .entries(let existing, let wasShown) = state else { return }
+        guard existing != entries || wasShown != isShownInMenuBar else { return }
+        let updatedState = State.entries(entries, isShownInMenuBar: isShownInMenuBar)
+        if existing.isEmpty != entries.isEmpty, let window {
+            let anchor = NSPoint(x: window.frame.midX, y: window.frame.maxY + 4)
+            show(state: updatedState, at: anchor)
+            return
+        }
+        state = updatedState
+        reloadRows()
+    }
+
     func close() {
         for monitor in monitors { NSEvent.removeMonitor(monitor) }
         monitors.removeAll()
@@ -175,7 +194,7 @@ final class GroupPanel: NSObject, NSSearchFieldDelegate {
             rows = [.done]
         case .entries(let entries, let isShownInMenuBar):
             let matching = ItemSearch.matches(entries, query: query) { entry in
-                [entry.title, entry.accessible.item.applicationName]
+                [entry.title, entry.item.applicationName]
             }
             rows = matching.map(Row.entry)
             if query.isEmpty, !entries.isEmpty, !isShownInMenuBar { rows.append(.showInMenuBar) }

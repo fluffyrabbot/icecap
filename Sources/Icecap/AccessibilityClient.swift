@@ -35,14 +35,8 @@ enum AccessibilityClient {
     )
     private static let maxConcurrentQueries = 16
 
-    private enum ValueReadResult {
-        case success(AXValue)
-        case unavailable
-        case failed
-    }
-
-    private enum FrameReadResult {
-        case success(CGRect)
+    private enum AttributeSlot {
+        case value(CFTypeRef)
         case unavailable
         case failed
     }
@@ -63,9 +57,9 @@ enum AccessibilityClient {
         _ = AXIsProcessTrustedWithOptions(options)
     }
 
-    /// Every menu bar icon of every running application, including this one, or of the
-    /// given process alone. Running applications are snapshotted on the main actor, then
-    /// queried on `queryQueue` so no main-actor executor assertion runs on worker threads.
+    /// Every menu bar icon of every non-prohibited running application, including this one,
+    /// or of the given process alone. Running applications are snapshotted on the main actor,
+    /// then queried on `queryQueue` so no main-actor executor assertion runs on worker threads.
     nonisolated static func items(ofProcess processIdentifier: Int32? = nil, includeDescriptions: Bool = true) async -> [AccessibleItem] {
         let owners = await processOwners(ofProcess: processIdentifier)
         return await scanItems(of: owners, includeDescriptions: includeDescriptions)
@@ -73,8 +67,11 @@ enum AccessibilityClient {
 
     @MainActor
     private static func processOwners(ofProcess processIdentifier: Int32?) -> [ProcessOwner] {
-        let applications = NSWorkspace.shared.runningApplications.filter {
-            processIdentifier == nil || $0.processIdentifier == processIdentifier
+        let applications = NSWorkspace.shared.runningApplications.filter { application in
+            if let processIdentifier {
+                return application.processIdentifier == processIdentifier
+            }
+            return application.activationPolicy != .prohibited
         }
         return applications.map { application in
             ProcessOwner(
@@ -189,6 +186,7 @@ enum AccessibilityClient {
                         continuation.resume(returning: nil)
                         return
                     }
+                    let attributes = [kAXPositionAttribute, kAXSizeAttribute]
                     var frames: [CGRect] = []
                     frames.reserveCapacity(elements.count)
                     for element in elements {
@@ -196,14 +194,21 @@ enum AccessibilityClient {
                             continuation.resume(returning: nil)
                             return
                         }
-                        switch frameResult(of: element) {
-                        case .success(let frame):
-                            frames.append(frame)
-                        case .unavailable:
-                            continue
-                        case .failed:
+                        guard let slots = multipleAttributeValues(of: element, attributes: attributes) else {
                             continuation.resume(returning: nil)
                             return
+                        }
+                        switch (slots[0], slots[1]) {
+                        case (.failed, _), (_, .failed):
+                            continuation.resume(returning: nil)
+                            return
+                        case (.unavailable, _), (_, .unavailable):
+                            continue
+                        case (.value(let positionRaw), .value(let sizeRaw)):
+                            guard let frame = cgRect(positionRaw: positionRaw, sizeRaw: sizeRaw) else {
+                                continue
+                            }
+                            frames.append(frame)
                         }
                     }
                     continuation.resume(returning: frames)
@@ -247,13 +252,19 @@ enum AccessibilityClient {
             AXUIElementCopyAttributeValue(barElement, kAXChildrenAttribute as CFString, &children) == .success,
             let elements = children as? [AXUIElement]
         else { return [] }
+        let attributes = includeDescriptions
+            ? [kAXPositionAttribute, kAXSizeAttribute, kAXDescriptionAttribute]
+            : [kAXPositionAttribute, kAXSizeAttribute]
         return elements.enumerated().compactMap { index, element in
-            guard case .success(let frame) = frameResult(of: element) else { return nil }
+            guard
+                let slots = multipleAttributeValues(of: element, attributes: attributes),
+                case .value(let positionRaw) = slots[0],
+                case .value(let sizeRaw) = slots[1],
+                let frame = cgRect(positionRaw: positionRaw, sizeRaw: sizeRaw)
+            else { return nil }
             var descriptionText: String?
-            if includeDescriptions {
-                var description: CFTypeRef?
-                AXUIElementCopyAttributeValue(element, kAXDescriptionAttribute as CFString, &description)
-                descriptionText = description as? String
+            if includeDescriptions, case .value(let descriptionRaw) = slots[2] {
+                descriptionText = descriptionRaw as? String
             }
             let item = MenuBarItem(
                 processIdentifier: owner.processIdentifier,
@@ -267,39 +278,59 @@ enum AccessibilityClient {
         }
     }
 
-    nonisolated private static func frameResult(of element: AXUIElement) -> FrameReadResult {
+    nonisolated private static func multipleAttributeValues(
+        of element: AXUIElement,
+        attributes: [String]
+    ) -> [AttributeSlot]? {
         setTimeout(element)
-        let position: AXValue
-        switch axValueResult(of: element, attribute: kAXPositionAttribute) {
-        case .success(let value): position = value
-        case .unavailable: return .unavailable
-        case .failed: return .failed
+        var rawValues: CFArray?
+        switch AXUIElementCopyMultipleAttributeValues(element, attributes as CFArray, [], &rawValues) {
+        case .success:
+            break
+        case .noValue, .attributeUnsupported:
+            return Array(repeating: .unavailable, count: attributes.count)
+        default:
+            return nil
         }
-        let size: AXValue
-        switch axValueResult(of: element, attribute: kAXSizeAttribute) {
-        case .success(let value): size = value
-        case .unavailable: return .unavailable
-        case .failed: return .failed
+        guard let rawValues else {
+            return nil
         }
-        var point = CGPoint.zero
-        var cgSize = CGSize.zero
-        guard
-            AXValueGetValue(position, .cgPoint, &point),
-            AXValueGetValue(size, .cgSize, &cgSize)
-        else { return .unavailable }
-        return .success(CGRect(origin: point, size: cgSize))
+        let array = rawValues as [AnyObject]
+        guard array.count == attributes.count else {
+            return nil
+        }
+        return array.map { raw in
+            if CFGetTypeID(raw) == CFNullGetTypeID() {
+                return .unavailable
+            }
+            if CFGetTypeID(raw) == AXValueGetTypeID() {
+                let value = raw as! AXValue
+                if AXValueGetType(value) == .axError {
+                    var errorCode = AXError.success
+                    guard AXValueGetValue(value, .axError, &errorCode) else { return .failed }
+                    switch errorCode {
+                    case .noValue, .attributeUnsupported:
+                        return .unavailable
+                    default:
+                        return .failed
+                    }
+                }
+            }
+            return .value(raw)
+        }
     }
 
-    nonisolated private static func axValueResult(of element: AXUIElement, attribute: String) -> ValueReadResult {
-        var raw: CFTypeRef?
-        switch AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) {
-        case .success:
-            guard let raw, CFGetTypeID(raw) == AXValueGetTypeID() else { return .unavailable }
-            return .success(raw as! AXValue)
-        case .noValue, .attributeUnsupported:
-            return .unavailable
-        default:
-            return .failed
-        }
+    nonisolated private static func cgRect(positionRaw: CFTypeRef, sizeRaw: CFTypeRef) -> CGRect? {
+        guard
+            CFGetTypeID(positionRaw) == AXValueGetTypeID(),
+            CFGetTypeID(sizeRaw) == AXValueGetTypeID()
+        else { return nil }
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        guard
+            AXValueGetValue(positionRaw as! AXValue, .cgPoint, &point),
+            AXValueGetValue(sizeRaw as! AXValue, .cgSize, &size)
+        else { return nil }
+        return CGRect(origin: point, size: size)
     }
 }
