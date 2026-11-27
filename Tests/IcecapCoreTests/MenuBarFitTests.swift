@@ -180,15 +180,84 @@ private func hiddenItem(
         #expect(cold.inventory == nil)
 
         var warm = warmFit(width: 200, at: 100)
-        // Narrower shown group (e.g. clipped on a narrow display) must not shrink hidden width.
-        warm.recordShownGroup([hiddenItem(10, x: 800, width: 32), hiddenItem(12, x: 900, width: 32)], spacerGeneration: generation, at: 105)
+        // Narrower shown group (e.g. clipped on a narrow display) must not shrink hidden width
+        // or drop items from the cached panel inventory.
+        warm.recordShownGroup([hiddenItem(12, x: 900, width: 32)], spacerGeneration: generation, at: 105)
         #expect(warm.inventory?.width == 200)
+        #expect(warm.inventory?.items.count == 2)
         #expect(warm.inventory?.processIdentifiers == [10, 11, 12])
         #expect(warm.inventory?.measuredAt == 105)
 
-        // Wider shown group updates width upwards.
-        warm.recordShownGroup([hiddenItem(10, x: 600, width: 32), hiddenItem(12, x: 900, width: 32)], spacerGeneration: generation, at: 110)
+        // Wider shown group with at least as many items updates both width and cached items.
+        let expandedShown = [hiddenItem(10, x: 600, width: 32), hiddenItem(12, x: 900, width: 32)]
+        warm.recordShownGroup(expandedShown, spacerGeneration: generation, at: 110)
         #expect(warm.inventory?.width == 332)
+        #expect(warm.inventory?.items == expandedShown)
+    }
+
+    @Test func cachedGroupItemsReturnsOrderedItemsOnlyWhenInventoryIsValid() {
+        var fit = warmFit(width: 120, at: 100)
+        let context = MenuBarFit.Context(
+            displayIdentifier: externalDisplay,
+            frontApplicationProcessIdentifier: frontPID,
+            spacerGeneration: generation
+        )
+        #expect(fit.cachedGroupItems(for: context, at: 150)?.map(\.processIdentifier) == [10, 11])
+        #expect(fit.cachedGroupItems(for: context, at: 100 + MenuBarFit.inventoryLifetime + 0.1) == nil)
+        #expect(fit.cachedGroupItems(for: MenuBarFit.Context(
+            displayIdentifier: externalDisplay,
+            frontApplicationProcessIdentifier: frontPID,
+            spacerGeneration: generation + 1
+        ), at: 110) == nil)
+
+        let emptyRecorded = fit.recordHiddenGroup([], displays: displays, spacerGeneration: generation, at: 200)
+        #expect(emptyRecorded)
+        #expect(fit.cachedGroupItems(for: context, at: 205) == [])
+
+        fit.invalidateInventory()
+        #expect(fit.cachedGroupItems(for: context, at: 205) == nil)
+    }
+
+    @Test func perDisplayBoundariesStayWarmAcrossDisplaysUntilInvalidated() {
+        let portraitDisplay: CGDirectDisplayID = 3
+        var fit = warmFit(width: 240, display: mainDisplay, dividerX: 1000, statusAreaMinX: 848, at: 100)
+        fit.recordBoundary(
+            displayIdentifier: portraitDisplay,
+            frontApplicationProcessIdentifier: frontPID,
+            dividerFrame: CGRect(x: 600, y: 177, width: 28, height: 30),
+            statusAreaMinX: 480,
+            spacerGeneration: generation,
+            at: 101
+        )
+        fit.recordBoundary(
+            displayIdentifier: externalDisplay,
+            frontApplicationProcessIdentifier: frontPID,
+            dividerFrame: CGRect(x: 2896, y: -64, width: 28, height: 30),
+            statusAreaMinX: 2140,
+            spacerGeneration: generation,
+            at: 102
+        )
+
+        #expect(fit.decision(for: MenuBarFit.Context(
+            displayIdentifier: mainDisplay,
+            frontApplicationProcessIdentifier: frontPID,
+            spacerGeneration: generation
+        ), at: 105) == .doesNotFit)
+        #expect(fit.decision(for: MenuBarFit.Context(
+            displayIdentifier: portraitDisplay,
+            frontApplicationProcessIdentifier: frontPID,
+            spacerGeneration: generation
+        ), at: 105) == .doesNotFit)
+        #expect(fit.decision(for: MenuBarFit.Context(
+            displayIdentifier: externalDisplay,
+            frontApplicationProcessIdentifier: frontPID,
+            spacerGeneration: generation
+        ), at: 105) == .fits(processIdentifiers: [10, 11]))
+
+        fit.invalidateBoundary()
+        #expect(fit.boundaries.isEmpty)
+        #expect(fit.boundary(for: externalDisplay) == nil)
+        #expect(fit.inventory != nil)
     }
 
     @Test func displayOrFrontApplicationMismatchRefreshesOnlyBoundary() {
@@ -335,7 +404,8 @@ private func hiddenItem(
         #expect(!fit.ownsGroupProcess(99))
 
         fit.invalidateBoundary()
-        #expect(fit.boundary == nil)
+        #expect(fit.boundary(for: externalDisplay) == nil)
+        #expect(fit.boundaries.isEmpty)
         #expect(fit.inventory != nil)
 
         fit.invalidateInventory()
@@ -345,7 +415,7 @@ private func hiddenItem(
         fit = warmFit(at: 100)
         fit.invalidateAll()
         #expect(fit.inventory == nil)
-        #expect(fit.boundary == nil)
+        #expect(fit.boundaries.isEmpty)
     }
 
     @Test func pendingClickTrackerCancelsAndSupersedesCleanly() {

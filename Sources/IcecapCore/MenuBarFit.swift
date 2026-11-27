@@ -5,30 +5,33 @@ import Foundation
 /// front application's menu titles and any camera housing, paired with the context under
 /// which it remains valid.
 ///
-/// The group's inventory (its width and owning processes) depends only on the group and its
-/// spacer placement, so it survives front-application and active-display changes. The
-/// boundary (the divider's frame and the status area's left edge) is keyed by display and
-/// front application so a warm chevron click can decide between peeking and opening the
-/// panel without waiting for Accessibility queries.
+/// The group's inventory (its items, width, and owning processes) depends only on the group
+/// and its spacer placement, so it survives front-application and active-display changes.
+/// Boundaries (the divider's frame and the status area's left edge) are cached per display
+/// for the current front application so clicks on any display route immediately without
+/// waiting for Accessibility queries.
 public struct MenuBarFit: Equatable, Sendable {
     /// How long a measured hidden-group inventory remains valid without refresh.
     public static let inventoryLifetime: TimeInterval = 90
     /// How long a measured display and menu-title boundary remains valid without refresh.
     public static let boundaryLifetime: TimeInterval = 30
 
-    /// The hidden group's measured width and the processes that own its icons.
+    /// The hidden group's measured items, width, and owning processes.
     public struct Inventory: Equatable, Sendable {
+        public var items: [MenuBarItem]
         public var width: CGFloat
         public var processIdentifiers: Set<Int32>
         public var spacerGeneration: SpacerLifecycle.Generation
         public var measuredAt: TimeInterval
 
         public init(
+            items: [MenuBarItem],
             width: CGFloat,
             processIdentifiers: Set<Int32>,
             spacerGeneration: SpacerLifecycle.Generation,
             measuredAt: TimeInterval
         ) {
+            self.items = items
             self.width = width
             self.processIdentifiers = processIdentifiers
             self.spacerGeneration = spacerGeneration
@@ -101,9 +104,14 @@ public struct MenuBarFit: Equatable, Sendable {
     }
 
     public private(set) var inventory: Inventory?
-    public private(set) var boundary: Boundary?
+    public private(set) var boundaries: [CGDirectDisplayID: Boundary] = [:]
 
     public init() {}
+
+    /// The cached boundary for `displayIdentifier`, if any.
+    public func boundary(for displayIdentifier: CGDirectDisplayID) -> Boundary? {
+        boundaries[displayIdentifier]
+    }
 
     /// Whether the cached inventory belongs to the current spacer generation and is still fresh.
     public func hasValidInventory(for context: Context, at time: TimeInterval) -> Bool {
@@ -117,16 +125,23 @@ public struct MenuBarFit: Equatable, Sendable {
         return true
     }
 
-    /// Whether the cached boundary matches the current spacer generation, display, and
-    /// front application, and is still fresh.
+    /// The cached hidden-group items if the inventory is valid for `context` at `time`, else nil.
+    public func cachedGroupItems(for context: Context, at time: TimeInterval) -> [MenuBarItem]? {
+        guard hasValidInventory(for: context, at: time), let inventory else {
+            return nil
+        }
+        return inventory.items
+    }
+
+    /// Whether the cached boundary for `context.displayIdentifier` matches the current
+    /// spacer generation and front application, and is still fresh.
     public func hasValidBoundary(for context: Context, at time: TimeInterval) -> Bool {
         guard
-            let boundary,
             let generation = context.spacerGeneration,
             let displayIdentifier = context.displayIdentifier,
             let frontApplicationProcessIdentifier = context.frontApplicationProcessIdentifier,
+            let boundary = boundaries[displayIdentifier],
             boundary.spacerGeneration == generation,
-            boundary.displayIdentifier == displayIdentifier,
             boundary.frontApplicationProcessIdentifier == frontApplicationProcessIdentifier,
             time >= boundary.measuredAt,
             time - boundary.measuredAt <= Self.boundaryLifetime
@@ -143,7 +158,11 @@ public struct MenuBarFit: Equatable, Sendable {
         if inventory.width <= 0 {
             return .doesNotFit
         }
-        guard hasValidBoundary(for: context, at: time), let boundary else {
+        guard
+            hasValidBoundary(for: context, at: time),
+            let displayIdentifier = context.displayIdentifier,
+            let boundary = boundaries[displayIdentifier]
+        else {
             return .unknown
         }
         if Divider.groupFits(
@@ -184,8 +203,8 @@ public struct MenuBarFit: Equatable, Sendable {
         }
     }
 
-    /// Records the hidden group's width and owning processes, rejecting samples captured
-    /// while the menu bar is still moving icons off-screen.
+    /// Records the hidden group's items, width, and owning processes, rejecting samples
+    /// captured while the menu bar is still moving icons off-screen.
     @discardableResult
     public mutating func recordHiddenGroup(
         _ group: [MenuBarItem],
@@ -197,6 +216,7 @@ public struct MenuBarFit: Equatable, Sendable {
             return false
         }
         inventory = Inventory(
+            items: group,
             width: Divider.groupWidth(group),
             processIdentifiers: Set(group.map(\.processIdentifier)),
             spacerGeneration: spacerGeneration,
@@ -207,7 +227,7 @@ public struct MenuBarFit: Equatable, Sendable {
 
     /// Updates an existing inventory for the same spacer generation while the group is shown,
     /// keeping the maximum observed width so icons clipped on narrow displays never shrink
-    /// the stored width.
+    /// the stored width or drop hidden items.
     public mutating func recordShownGroup(
         _ group: [MenuBarItem],
         spacerGeneration: SpacerLifecycle.Generation,
@@ -215,6 +235,9 @@ public struct MenuBarFit: Equatable, Sendable {
     ) {
         guard var existing = inventory, existing.spacerGeneration == spacerGeneration else {
             return
+        }
+        if group.count >= existing.items.count {
+            existing.items = group
         }
         existing.width = max(existing.width, Divider.groupWidth(group))
         existing.processIdentifiers.formUnion(group.map(\.processIdentifier))
@@ -231,7 +254,7 @@ public struct MenuBarFit: Equatable, Sendable {
         spacerGeneration: SpacerLifecycle.Generation,
         at time: TimeInterval
     ) {
-        boundary = Boundary(
+        boundaries[displayIdentifier] = Boundary(
             displayIdentifier: displayIdentifier,
             frontApplicationProcessIdentifier: frontApplicationProcessIdentifier,
             dividerFrame: dividerFrame,
@@ -242,7 +265,7 @@ public struct MenuBarFit: Equatable, Sendable {
     }
 
     public mutating func invalidateBoundary() {
-        boundary = nil
+        boundaries.removeAll()
     }
 
     public mutating func invalidateInventory() {
@@ -251,7 +274,7 @@ public struct MenuBarFit: Equatable, Sendable {
 
     public mutating func invalidateAll() {
         inventory = nil
-        boundary = nil
+        boundaries.removeAll()
     }
 
     /// Whether `processIdentifier` owns at least one icon in the cached group inventory.
