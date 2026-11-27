@@ -64,20 +64,28 @@ enum AccessibilityClient {
     }
 
     /// Every menu bar icon of every running application, including this one, or of the
-    /// given process alone. Queries run off the main actor in bounded parallel batches so
-    /// slow owners do not delay responsive ones or the user interface.
+    /// given process alone. Running applications are snapshotted on the main actor, then
+    /// queried on `queryQueue` so no main-actor executor assertion runs on worker threads.
+    nonisolated static func items(ofProcess processIdentifier: Int32? = nil, includeDescriptions: Bool = true) async -> [AccessibleItem] {
+        let owners = await processOwners(ofProcess: processIdentifier)
+        return await scanItems(of: owners, includeDescriptions: includeDescriptions)
+    }
+
     @MainActor
-    static func items(ofProcess processIdentifier: Int32? = nil, includeDescriptions: Bool = true) async -> [AccessibleItem] {
+    private static func processOwners(ofProcess processIdentifier: Int32?) -> [ProcessOwner] {
         let applications = NSWorkspace.shared.runningApplications.filter {
             processIdentifier == nil || $0.processIdentifier == processIdentifier
         }
-        let owners = applications.map { application in
+        return applications.map { application in
             ProcessOwner(
                 processIdentifier: application.processIdentifier,
                 bundleIdentifier: application.bundleIdentifier,
                 name: application.localizedName ?? application.bundleIdentifier ?? "Unknown"
             )
         }
+    }
+
+    nonisolated private static func scanItems(of owners: [ProcessOwner], includeDescriptions: Bool) async -> [AccessibleItem] {
         guard !owners.isEmpty else { return [] }
         if owners.count == 1 {
             let owner = owners[0]
@@ -140,7 +148,7 @@ enum AccessibilityClient {
     /// The frames of the given application's menu titles, the Apple menu included, as laid
     /// out on the display whose menu bar is active: none for an application that has no
     /// menu bar, and nil when the menu bar or any menu title could not be read reliably.
-    static func frontMenuTitleFrames(ofProcess processIdentifier: Int32) async -> [CGRect]? {
+    nonisolated static func frontMenuTitleFrames(ofProcess processIdentifier: Int32) async -> [CGRect]? {
         let cancelled = OSAllocatedUnfairLock(initialState: false)
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -209,7 +217,7 @@ enum AccessibilityClient {
     /// Presses the icon as a click would, off the main actor. Some owners open their menu
     /// yet report that the action could not complete, so that result is treated as success.
     @discardableResult
-    static func press(_ element: AXUIElement) async -> Bool {
+    nonisolated static func press(_ element: AXUIElement) async -> Bool {
         let wrapped = SendableElement(element: element)
         return await withCheckedContinuation { continuation in
             queryQueue.async {
@@ -220,11 +228,11 @@ enum AccessibilityClient {
         }
     }
 
-    private static func setTimeout(_ element: AXUIElement) {
+    nonisolated private static func setTimeout(_ element: AXUIElement) {
         AXUIElementSetMessagingTimeout(element, requestTimeout)
     }
 
-    private static func readItems(of owner: ProcessOwner, includeDescriptions: Bool) -> [AccessibleItem] {
+    nonisolated private static func readItems(of owner: ProcessOwner, includeDescriptions: Bool) -> [AccessibleItem] {
         let application = AXUIElementCreateApplication(owner.processIdentifier)
         setTimeout(application)
         var bar: CFTypeRef?
@@ -259,7 +267,7 @@ enum AccessibilityClient {
         }
     }
 
-    private static func frameResult(of element: AXUIElement) -> FrameReadResult {
+    nonisolated private static func frameResult(of element: AXUIElement) -> FrameReadResult {
         setTimeout(element)
         let position: AXValue
         switch axValueResult(of: element, attribute: kAXPositionAttribute) {
@@ -282,7 +290,7 @@ enum AccessibilityClient {
         return .success(CGRect(origin: point, size: cgSize))
     }
 
-    private static func axValueResult(of element: AXUIElement, attribute: String) -> ValueReadResult {
+    nonisolated private static func axValueResult(of element: AXUIElement, attribute: String) -> ValueReadResult {
         var raw: CFTypeRef?
         switch AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) {
         case .success:

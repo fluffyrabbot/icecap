@@ -925,6 +925,7 @@ final class DividerController: NSObject {
                 settleRetryTask?.cancel()
                 settleRetryTask = nil
                 settleRetryAttempts = 0
+                Self.log.debug("measured hidden group: \(group.count) icons, width \(Divider.groupWidth(group), privacy: .public)")
             } else if scheduleRetryOnMidMove {
                 Self.log.info("group not yet pushed off the displays; measuring it again later")
                 scheduleSettleRetryIfNeeded(for: generation)
@@ -954,14 +955,16 @@ final class DividerController: NSObject {
             }
             return
         }
+        let minX = statusAreaMinX(on: screen, menuTitleFrames: menuTitleFrames)
         fit.recordBoundary(
             displayIdentifier: screen.displayIdentifier,
             frontApplicationProcessIdentifier: frontPID,
             dividerFrame: dividerFrame,
-            statusAreaMinX: statusAreaMinX(on: screen, menuTitleFrames: menuTitleFrames),
+            statusAreaMinX: minX,
             spacerGeneration: generation,
             at: now
         )
+        Self.log.debug("measured status boundary on display \(screen.displayIdentifier, privacy: .public): minX \(minX, privacy: .public)")
     }
 
     private func currentClickContext() -> MenuBarFit.Context {
